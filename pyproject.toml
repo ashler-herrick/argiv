@@ -1,0 +1,31 @@
+[project]
+name = "argiv"
+version = "0.1.0"
+description = "High-performance options Greeks via QuantLib + Arrow"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyarrow>=17.0",
+    "numpy",
+    "scipy>=1.17.0",
+]
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.install-dir = "argiv"
+
+[tool.scikit-build.cmake.define]
+CMAKE_TOOLCHAIN_FILE = "/home/ashler/vcpkg/scripts/buildsystems/vcpkg.cmake"
+
+[dependency-groups]
+dev = [
+    "pybind11>=3.0.1",
+    "pyarrow>=23.0.0",
+    "pytest>=9.0.2",
+    "scikit-build-core>=0.11.6",
+    "numpy",
+]

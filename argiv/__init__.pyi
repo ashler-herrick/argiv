@@ -1,0 +1,3 @@
+import pyarrow as pa
+
+def compute_greeks(table: pa.Table) -> pa.Table: ...
