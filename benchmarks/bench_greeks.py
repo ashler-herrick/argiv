@@ -1,21 +1,53 @@
 """Benchmark argiv (C++/OpenMP) vs pure-Python Black-Scholes Greeks computation."""
 
 import math
-import os
 import statistics
-import subprocess
-import sys
 import time
+from dataclasses import dataclass, field
 
-import numpy as np
 import pyarrow as pa
 from scipy.optimize import brentq
 from scipy.stats import norm
+import QuantLib as ql
+
+from argiv.helpers import generate_dataset
+
+# ---------------------------------------------------------------------------
+# BenchmarkResult dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BenchmarkResult:
+    library: str
+    size: int
+    times: list[float] = field(default_factory=list)
+
+    @property
+    def mean(self) -> float:
+        return statistics.mean(self.times)
+
+    @property
+    def std(self) -> float:
+        return statistics.stdev(self.times) if len(self.times) > 1 else 0.0
+
+    @property
+    def median(self) -> float:
+        return statistics.median(self.times)
+
+    @property
+    def min(self) -> float:
+        return min(self.times)
+
+    @property
+    def max(self) -> float:
+        return max(self.times)
 
 
 # ---------------------------------------------------------------------------
 # Pure-Python Black-Scholes baseline
 # ---------------------------------------------------------------------------
+
 
 def _bs_call_price(S, K, T, r, q, sigma):
     d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
@@ -102,151 +134,159 @@ def compute_greeks_python(table):
 
 
 # ---------------------------------------------------------------------------
-# Data generation
+# QuantLib-Python baseline
 # ---------------------------------------------------------------------------
 
-def generate_dataset(n):
-    """Generate a realistic mixed options dataset with known-valid IV solutions."""
-    rng = np.random.default_rng(42)
 
-    option_type = rng.choice([1, -1], size=n).astype(np.int32)
-    spot = np.full(n, 100.0)
-    strike = rng.uniform(80.0, 120.0, size=n)
-    expiry = rng.uniform(0.1, 2.0, size=n)
-    rate = np.full(n, 0.05)
-    dividend_yield = np.full(n, 0.01)
-    true_sigma = rng.uniform(0.1, 0.5, size=n)
+def compute_greeks_quantlib(table):
+    """Row-by-row QuantLib BSM Greeks computation."""
+    n = table.num_rows
+    opt = table.column("option_type").to_pylist()
+    spot = table.column("spot").to_pylist()
+    strike = table.column("strike").to_pylist()
+    expiry = table.column("expiry").to_pylist()
+    rate = table.column("rate").to_pylist()
+    div = table.column("dividend_yield").to_pylist()
+    mkt = table.column("market_price").to_pylist()
 
-    # Compute market prices from known sigmas via BS formula
-    market_price = np.empty(n)
+    calendar = ql.NullCalendar()
+    day_count = ql.Actual365Fixed()
+    today = ql.Date.todaysDate()
+    ql.Settings.instance().evaluationDate = today
+
     for i in range(n):
-        if option_type[i] == 1:
-            market_price[i] = _bs_call_price(
-                spot[i], strike[i], expiry[i], rate[i], dividend_yield[i], true_sigma[i]
-            )
-        else:
-            market_price[i] = _bs_put_price(
-                spot[i], strike[i], expiry[i], rate[i], dividend_yield[i], true_sigma[i]
-            )
+        S, K, T, r, q, price = spot[i], strike[i], expiry[i], rate[i], div[i], mkt[i]
+        option_type = ql.Option.Call if opt[i] == 1 else ql.Option.Put
 
-    return pa.table({
-        "option_type": pa.array(option_type, type=pa.int32()),
-        "spot": pa.array(spot, type=pa.float64()),
-        "strike": pa.array(strike, type=pa.float64()),
-        "expiry": pa.array(expiry, type=pa.float64()),
-        "rate": pa.array(rate, type=pa.float64()),
-        "dividend_yield": pa.array(dividend_yield, type=pa.float64()),
-        "market_price": pa.array(market_price, type=pa.float64()),
-    })
+        # Maturity date from T in years
+        maturity_days = max(int(round(T * 365)), 1)
+        maturity = today + ql.Period(maturity_days, ql.Days)
+
+        payoff = ql.PlainVanillaPayoff(option_type, K)
+        exercise = ql.EuropeanExercise(maturity)
+        option = ql.VanillaOption(payoff, exercise)
+
+        spot_handle = ql.QuoteHandle(ql.SimpleQuote(S))
+        rate_curve = ql.YieldTermStructureHandle(
+            ql.FlatForward(today, r, day_count)
+        )
+        div_curve = ql.YieldTermStructureHandle(
+            ql.FlatForward(today, q, day_count)
+        )
+        vol_handle = ql.BlackVolTermStructureHandle(
+            ql.BlackConstantVol(today, calendar, 0.20, day_count)
+        )
+
+        process = ql.BlackScholesMertonProcess(
+            spot_handle, div_curve, rate_curve, vol_handle
+        )
+
+        # Solve for IV
+        try:
+            sigma = option.impliedVolatility(price, process)
+        except RuntimeError:
+            continue
+
+        # Re-price with solved vol to extract Greeks
+        solved_vol = ql.BlackVolTermStructureHandle(
+            ql.BlackConstantVol(today, calendar, sigma, day_count)
+        )
+        solved_process = ql.BlackScholesMertonProcess(
+            spot_handle, div_curve, rate_curve, solved_vol
+        )
+        option.setPricingEngine(ql.AnalyticEuropeanEngine(solved_process))
+
+        option.delta()
+        option.gamma()
+        option.vega()
+        option.theta()
+        option.rho()
 
 
 # ---------------------------------------------------------------------------
 # Benchmark helpers
 # ---------------------------------------------------------------------------
 
-def time_fn(fn, *args, repeats=3):
-    """Return median wall-clock time over `repeats` runs."""
+
+def benchmark_fn(fn, *args, warmup=2, trials=10):
+    """Run warmup discarded invocations, then return list of trial times."""
+    for _ in range(warmup):
+        fn(*args)
+
     times = []
-    for _ in range(repeats):
+    for _ in range(trials):
         t0 = time.perf_counter()
         fn(*args)
         times.append(time.perf_counter() - t0)
-    return statistics.median(times)
+    return times
 
 
-# ---------------------------------------------------------------------------
-# Thread-scaling sub-process runner
-# ---------------------------------------------------------------------------
+def print_comparison_table(size, results, argiv_result):
+    """Print a markdown table comparing libraries for a given dataset size."""
+    print(f"\n### {size:,} rows\n")
+    print("| Library        |   Mean (s) |    Std (s) | Median (s) |    Min (s) |    Max (s) | vs argiv |")
+    print("|----------------|------------|------------|------------|------------|------------|----------|")
 
-_THREAD_BENCH_SCRIPT = """\
-import os, sys, time, statistics
-os.environ["OMP_NUM_THREADS"] = sys.argv[1]
-
-import pyarrow.ipc as ipc
-import argiv
-
-reader = ipc.open_file(sys.argv[2])
-table = reader.read_all()
-
-times = []
-for _ in range(3):
-    t0 = time.perf_counter()
-    argiv.compute_greeks(table)
-    times.append(time.perf_counter() - t0)
-
-print(statistics.median(times))
-"""
-
-
-def bench_threads(table, threads_list):
-    """Run argiv in a subprocess for each thread count, return {threads: median_seconds}."""
-    import tempfile
-
-    # Write table to a temp IPC file for subprocess to read
-    tmp = tempfile.NamedTemporaryFile(suffix=".arrow", delete=False)
-    writer = pa.ipc.new_file(tmp, table.schema)
-    writer.write_table(table)
-    writer.close()
-    tmp.close()
-
-    results = {}
-    for t in threads_list:
-        proc = subprocess.run(
-            [sys.executable, "-c", _THREAD_BENCH_SCRIPT, str(t), tmp.name],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            print(f"  Thread={t} FAILED: {proc.stderr.strip()}", file=sys.stderr)
-            results[t] = float("nan")
+    for r in results:
+        if r.library == "argiv":
+            speedup_str = "       -"
         else:
-            results[t] = float(proc.stdout.strip())
-    os.unlink(tmp.name)
-    return results
+            speedup_str = f"{r.median / argiv_result.median:>6.0f}x "
+        print(
+            f"| {r.library:<14s} "
+            f"| {r.mean:>10.4f} "
+            f"| {r.std:>10.4f} "
+            f"| {r.median:>10.4f} "
+            f"| {r.min:>10.4f} "
+            f"| {r.max:>10.4f} "
+            f"| {speedup_str} |"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     import argiv
 
-    sizes = [1_000, 10_000]
+    # -- Header ----------------------------------------------------------------
+    print("# argiv benchmark\n")
+    print(f"  argiv:          installed")
+    print(f"  Python (scipy): installed")
+    print(f"  QuantLib:       installed")
+    print()
 
-    # -- Size scaling -----------------------------------------------------------
+    # -- Size scaling ----------------------------------------------------------
+    # Size strategy:
+    #   1,000:   Python, QuantLib, argiv
+    #   10,000:  Python, QuantLib, argiv
+    #   100,000: argiv only
+    sizes = [1_000, 10_000, 100_000]
+
     print("## Size Scaling (all threads)\n")
-    print("| Rows      | Python (s) | C++ (s)  | Speedup |")
-    print("|-----------|------------|----------|---------|")
 
     for n in sizes:
         table = generate_dataset(n)
+        results = []
 
-        cpp_t = time_fn(argiv.compute_greeks, table)
+        # argiv (always run)
+        times = benchmark_fn(argiv.compute_greeks, table)
+        argiv_result = BenchmarkResult(library="argiv", size=n, times=times)
+        results.append(argiv_result)
 
-        py_t = time_fn(compute_greeks_python, table)
-        speedup = py_t / cpp_t
-        print(f"| {n:>9,} | {py_t:10.4f} | {cpp_t:8.4f} | {speedup:>5.0f}x  |")
+        # Python/scipy baseline (skip at 100k)
+        if n <= 10_000:
+            times = benchmark_fn(compute_greeks_python, table, warmup=1, trials=3)
+            results.append(BenchmarkResult(library="Python (scipy)", size=n, times=times))
 
+        # QuantLib (skip at 100k)
+        if n <= 10_000:
+            times = benchmark_fn(compute_greeks_quantlib, table, warmup=1, trials=3)
+            results.append(BenchmarkResult(library="QuantLib", size=n, times=times))
 
-    # -- Thread scaling ---------------------------------------------------------
-    print()
-    print("## Thread Scaling (100k rows)\n")
-    print("| Threads | C++ (s)  | vs 1-thread |")
-    print("|---------|----------|-------------|")
-
-    table_100k = generate_dataset(1_000_000)
-    threads = [1, 2, 4, 8, 16]
-    results = bench_threads(table_100k, threads)
-
-    base = results.get(1, float("nan"))
-    for t in threads:
-        sec = results[t]
-        if math.isnan(sec) or math.isnan(base):
-            print(f"| {t:>7} | {sec:8.4f} |         n/a |")
-        else:
-            scaling = base / sec
-            print(f"| {t:>7} | {sec:8.4f} | {scaling:>9.2f}x |")
+        print_comparison_table(n, results, argiv_result)
 
 
 if __name__ == "__main__":
