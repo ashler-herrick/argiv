@@ -1,28 +1,7 @@
-import math
-
 import pyarrow as pa
-import pytest
 
 import argiv
-
-
-def _bs_call_price(S, K, T, r, q, sigma):
-    """Reference Black-Scholes call price for test verification."""
-    from math import exp, log, sqrt
-
-    from scipy.stats import norm
-
-    d1 = (log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
-    d2 = d1 - sigma * sqrt(T)
-    return S * exp(-q * T) * norm.cdf(d1) - K * exp(-r * T) * norm.cdf(d2)
-
-
-def _bs_put_price(S, K, T, r, q, sigma):
-    """Reference Black-Scholes put price via put-call parity."""
-    from math import exp
-
-    call = _bs_call_price(S, K, T, r, q, sigma)
-    return call - S * exp(-q * T) + K * exp(-r * T)
+from argiv.helpers import _bs_call_price, _bs_put_price
 
 
 def _make_table(option_type, spot, strike, expiry, rate, div_yield, price):

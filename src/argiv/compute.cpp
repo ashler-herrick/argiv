@@ -10,42 +10,25 @@ namespace argiv {
 
 namespace {
 
-// Helper to get a double column's raw data (assumes single chunk, Float64).
+// Helper to get a double column's raw data (requires single-chunk table).
 const double* get_double_col(const std::shared_ptr<arrow::Table>& table,
                              const std::string& name) {
     auto col = table->GetColumnByName(name);
     if (!col) {
         throw std::runtime_error("Missing column: " + name);
     }
-    // Combine chunks if needed
-    auto chunked = col;
-    if (chunked->num_chunks() != 1) {
-        auto result = arrow::Concatenate(chunked->chunks());
-        if (!result.ok()) {
-            throw std::runtime_error("Failed to concatenate chunks for " + name);
-        }
-        chunked = std::make_shared<arrow::ChunkedArray>(result.MoveValueUnsafe());
-    }
-    auto arr = std::static_pointer_cast<arrow::DoubleArray>(chunked->chunk(0));
+    auto arr = std::static_pointer_cast<arrow::DoubleArray>(col->chunk(0));
     return arr->raw_values();
 }
 
-// Helper to get int32 column's raw data.
+// Helper to get int32 column's raw data (requires single-chunk table).
 const int32_t* get_int_col(const std::shared_ptr<arrow::Table>& table,
                            const std::string& name) {
     auto col = table->GetColumnByName(name);
     if (!col) {
         throw std::runtime_error("Missing column: " + name);
     }
-    auto chunked = col;
-    if (chunked->num_chunks() != 1) {
-        auto result = arrow::Concatenate(chunked->chunks());
-        if (!result.ok()) {
-            throw std::runtime_error("Failed to concatenate chunks for " + name);
-        }
-        chunked = std::make_shared<arrow::ChunkedArray>(result.MoveValueUnsafe());
-    }
-    auto arr = std::static_pointer_cast<arrow::Int32Array>(chunked->chunk(0));
+    auto arr = std::static_pointer_cast<arrow::Int32Array>(col->chunk(0));
     return arr->raw_values();
 }
 
@@ -53,24 +36,30 @@ const int32_t* get_int_col(const std::shared_ptr<arrow::Table>& table,
 
 std::shared_ptr<arrow::Table> compute_greeks_table(
     const std::shared_ptr<arrow::Table>& input) {
-    const int64_t n = input->num_rows();
+
+    // Combine chunks upfront so raw pointers remain valid.
+    auto combined_result = input->CombineChunks();
+    if (!combined_result.ok()) {
+        throw std::runtime_error("Failed to combine chunks: " +
+                                 combined_result.status().ToString());
+    }
+    auto table = combined_result.MoveValueUnsafe();
+    const int64_t n = table->num_rows();
 
     // Extract input columns
-    const int32_t* option_type = get_int_col(input, "option_type");
-    const double* spot = get_double_col(input, "spot");
-    const double* strike = get_double_col(input, "strike");
-    const double* expiry = get_double_col(input, "expiry");
-    const double* rate = get_double_col(input, "rate");
-    const double* dividend_yield = get_double_col(input, "dividend_yield");
-    const double* market_price = get_double_col(input, "market_price");
+    const int32_t* option_type = get_int_col(table, "option_type");
+    const double* spot = get_double_col(table, "spot");
+    const double* strike = get_double_col(table, "strike");
+    const double* expiry = get_double_col(table, "expiry");
+    const double* rate = get_double_col(table, "rate");
+    const double* dividend_yield = get_double_col(table, "dividend_yield");
+    const double* market_price = get_double_col(table, "market_price");
 
     // Pre-allocate output vectors
     std::vector<double> iv(n), delta(n), gamma(n), vega(n), theta(n), rho(n);
 
     // Parallel computation
-#ifdef _OPENMP
     #pragma omp parallel for schedule(dynamic, 256)
-#endif
     for (int64_t i = 0; i < n; ++i) {
         auto res = compute_single(option_type[i], spot[i], strike[i],
                                   expiry[i], rate[i], dividend_yield[i],
@@ -101,7 +90,7 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
     };
 
     // Start with input columns, append output columns
-    auto result = input;
+    auto result = table;
     result = *result->AddColumn(result->num_columns(),
                                 arrow::field("iv", arrow::float64()),
                                 build_col("iv", iv));

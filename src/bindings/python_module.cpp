@@ -11,11 +11,29 @@ PYBIND11_MODULE(_core, m) {
     m.def(
         "compute_greeks",
         [](py::object input_table) -> py::object {
-            // Import pyarrow table -> C++ Arrow table
+            // Import pyarrow table -> C++ Arrow table (needs GIL for PyArrow)
             auto table = argiv::import_table(input_table);
-            // Compute IV + Greeks
-            auto result = argiv::compute_greeks_table(table);
-            // Export back to pyarrow table
+            const int64_t n = table->num_rows();
+            if (n==0){
+                // Handle empty table: return immediately with output columns appended.
+                auto empty_arr = std::make_shared<arrow::DoubleArray>(0, nullptr);
+                auto empty_chunked = std::make_shared<arrow::ChunkedArray>(empty_arr);
+                auto result = table;
+                for (const auto& name : {"iv", "delta", "gamma", "vega", "theta", "rho"}) {
+                    result = *result->AddColumn(result->num_columns(),
+                                                arrow::field(name, arrow::float64()),
+                                                empty_chunked);
+                }
+                return argiv::export_table(result);
+            }
+            // Release GIL for the CPU-bound computation so OpenMP threads can run
+            std::shared_ptr<arrow::Table> result;
+            {
+                py::gil_scoped_release release;
+                result = argiv::compute_greeks_table(table);
+            }
+
+            // Export back to pyarrow table (needs GIL for PyArrow)
             return argiv::export_table(result);
         },
         py::arg("table"),

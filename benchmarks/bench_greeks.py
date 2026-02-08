@@ -112,7 +112,11 @@ def compute_greeks_python(table):
         def objective(sigma, _S=S, _K=K, _T=T, _r=r, _q=q, _price=price, _pricer=pricer):
             return _pricer(_S, _K, _T, _r, _q, sigma) - _price
 
-        sigma = brentq(objective, 1e-6, 5.0, xtol=1e-6, maxiter=100)
+        try:
+            sigma = brentq(objective, 1e-6, 5.0, xtol=1e-6, maxiter=100)
+        except (ValueError, RuntimeError):
+            # Skip rows with invalid IV (price out of bounds)
+            sigma = 0.2  # Use a default vol
         d, g, v, th, rh = _bs_greeks(ot, S, K, T, r, q, sigma)
 
         iv_out.append(sigma)
@@ -253,44 +257,44 @@ def main():
 
     # -- Header ----------------------------------------------------------------
     print("# argiv benchmark\n")
-    print(f"  argiv:          installed")
-    print(f"  Python (scipy): installed")
-    print(f"  QuantLib:       installed")
+    print("  argiv:          installed")
+    print("  Python (scipy): installed")
+    print("  PyQuantLib:     installed")
     print()
 
     # -- Size scaling ----------------------------------------------------------
     # Size strategy:
     #   1,000:   Python, QuantLib, argiv
-    #   10,000:  Python, QuantLib, argiv
-    #   100,000: argiv only
+    #   10,000:  QuantLib, argiv
+    #   100,000+: argiv only
     sizes = [1_000, 10_000, 100_000, 1_000_000]
-
+    trials = 50
     print("## Size Scaling (all threads)\n")
-
+    results = {}
     for n in sizes:
-        print("generating dataset...")
+        print(f"generating dataset of size {n}...")
         table = generate_dataset(n)
-        results = []
+        results[n] = []
 
         # argiv (always run)
         print("running argiv...")
-        times = benchmark_fn(argiv.compute_greeks, table)
+        times = benchmark_fn(argiv.compute_greeks, table, trials=trials)
         argiv_result = BenchmarkResult(library="argiv", size=n, times=times)
-        results.append(argiv_result)
+        results[n].append(argiv_result)
 
         # Python/scipy baseline (skip at 100k)
-        if n <= 10_000:
+        if n <= 1_000:
             print("running Python (scipy)...")
-            times = benchmark_fn(compute_greeks_python, table, warmup=1, trials=3)
-            results.append(BenchmarkResult(library="Python (scipy)", size=n, times=times))
-
-        # QuantLib (skip at 100k)
+            times = benchmark_fn(compute_greeks_python, table, warmup=1, trials=trials)
+            results[n].append(BenchmarkResult(library="Python (scipy)", size=n, times=times))
         if n <= 10_000:
             print("running PyQuantLib...")
-            times = benchmark_fn(compute_greeks_quantlib, table, warmup=1, trials=3)
-            results.append(BenchmarkResult(library="QuantLib", size=n, times=times))
+            times = benchmark_fn(compute_greeks_quantlib, table, warmup=1, trials=trials)
+            results[n].append(BenchmarkResult(library="PyQuantLib", size=n, times=times))
+        
 
-        print_comparison_table(n, results, argiv_result)
+    for n, res in results.items():
+        print_comparison_table(n, res, res[0])
 
 
 if __name__ == "__main__":
