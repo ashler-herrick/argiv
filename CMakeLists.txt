@@ -23,3 +23,18 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 install(TARGETS _core LIBRARY DESTINATION .)
+
+# Install Python source files
+install(FILES
+    argiv/__init__.py
+    argiv/helpers.py
+    DESTINATION .
+)
+
+# Install Python stub files and py.typed marker for type hints (PEP 561)
+install(FILES
+    argiv/__init__.pyi
+    argiv/_core.pyi
+    argiv/py.typed
+    DESTINATION .
+)

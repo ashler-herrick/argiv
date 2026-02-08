@@ -3,7 +3,7 @@ import pyarrow as pa
 def compute_greeks(table: pa.Table) -> pa.Table: 
     """
     Computes the IV and first order Greeks plus Gamma for a pyarrow Table.
-    
+
     Args:
         table (pa.Table): Input Arrow Table with columns:
             - option_type (int32): 1 for Call, -1 for Put
