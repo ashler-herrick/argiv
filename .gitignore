@@ -16,3 +16,6 @@ _skbuild/
 
 .claude
 .pytest_cache/
+
+.vscode
+
