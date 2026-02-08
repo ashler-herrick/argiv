@@ -263,26 +263,30 @@ def main():
     #   1,000:   Python, QuantLib, argiv
     #   10,000:  Python, QuantLib, argiv
     #   100,000: argiv only
-    sizes = [1_000, 10_000, 100_000]
+    sizes = [1_000, 10_000, 100_000, 1_000_000]
 
     print("## Size Scaling (all threads)\n")
 
     for n in sizes:
+        print("generating dataset...")
         table = generate_dataset(n)
         results = []
 
         # argiv (always run)
+        print("running argiv...")
         times = benchmark_fn(argiv.compute_greeks, table)
         argiv_result = BenchmarkResult(library="argiv", size=n, times=times)
         results.append(argiv_result)
 
         # Python/scipy baseline (skip at 100k)
         if n <= 10_000:
+            print("running Python (scipy)...")
             times = benchmark_fn(compute_greeks_python, table, warmup=1, trials=3)
             results.append(BenchmarkResult(library="Python (scipy)", size=n, times=times))
 
         # QuantLib (skip at 100k)
         if n <= 10_000:
+            print("running PyQuantLib...")
             times = benchmark_fn(compute_greeks_quantlib, table, warmup=1, trials=3)
             results.append(BenchmarkResult(library="QuantLib", size=n, times=times))
 
