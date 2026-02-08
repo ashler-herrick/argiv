@@ -1,11 +1,12 @@
 """Benchmark argiv (C++/OpenMP) vs pure-Python Black-Scholes Greeks computation."""
 
 import math
+import os
 import statistics
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
-import pyarrow as pa
 from scipy.optimize import brentq
 from scipy.stats import norm
 import QuantLib as ql
@@ -87,24 +88,9 @@ def _bs_greeks(option_type, S, K, T, r, q, sigma):
     return delta, gamma, vega, theta, rho
 
 
-def compute_greeks_python(table):
-    """Pure-Python compute_greeks — same interface as argiv.compute_greeks."""
-    n = table.num_rows
-    opt = table.column("option_type").to_pylist()
-    spot = table.column("spot").to_pylist()
-    strike = table.column("strike").to_pylist()
-    expiry = table.column("expiry").to_pylist()
-    rate = table.column("rate").to_pylist()
-    div = table.column("dividend_yield").to_pylist()
-    mkt = table.column("market_price").to_pylist()
-
-    iv_out = []
-    delta_out = []
-    gamma_out = []
-    vega_out = []
-    theta_out = []
-    rho_out = []
-
+def compute_greeks_python(opt, spot, strike, expiry, rate, div, mkt):
+    """Pure-Python compute_greeks on pre-extracted numpy arrays."""
+    n = len(opt)
     for i in range(n):
         ot, S, K, T, r, q, price = opt[i], spot[i], strike[i], expiry[i], rate[i], div[i], mkt[i]
         pricer = _bs_call_price if ot == 1 else _bs_put_price
@@ -115,26 +101,31 @@ def compute_greeks_python(table):
         try:
             sigma = brentq(objective, 1e-6, 5.0, xtol=1e-6, maxiter=100)
         except (ValueError, RuntimeError):
-            # Skip rows with invalid IV (price out of bounds)
-            sigma = 0.2  # Use a default vol
-        d, g, v, th, rh = _bs_greeks(ot, S, K, T, r, q, sigma)
+            sigma = 0.2
+        _bs_greeks(ot, S, K, T, r, q, sigma)
 
-        iv_out.append(sigma)
-        delta_out.append(d)
-        gamma_out.append(g)
-        vega_out.append(v)
-        theta_out.append(th)
-        rho_out.append(rh)
 
-    columns = {name: table.column(name) for name in table.column_names}
-    columns["iv"] = pa.array(iv_out, type=pa.float64())
-    columns["delta"] = pa.array(delta_out, type=pa.float64())
-    columns["gamma"] = pa.array(gamma_out, type=pa.float64())
-    columns["vega"] = pa.array(vega_out, type=pa.float64())
-    columns["theta"] = pa.array(theta_out, type=pa.float64())
-    columns["rho"] = pa.array(rho_out, type=pa.float64())
+def _python_worker(args):
+    """Worker for ProcessPoolExecutor — runs compute_greeks_python on a chunk."""
+    opt, spot, strike, expiry, rate, div, mkt = args
+    compute_greeks_python(opt, spot, strike, expiry, rate, div, mkt)
 
-    return pa.table(columns)
+
+def compute_greeks_python_parallel(opt, spot, strike, expiry, rate, div, mkt):
+    """Parallel wrapper using ProcessPoolExecutor."""
+    ncpu = os.cpu_count() or 1
+    n = len(opt)
+    chunk_size = (n + ncpu - 1) // ncpu
+
+    chunks = []
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunks.append((opt[start:end], spot[start:end], strike[start:end],
+                        expiry[start:end], rate[start:end], div[start:end],
+                        mkt[start:end]))
+
+    with ProcessPoolExecutor(max_workers=ncpu) as pool:
+        list(pool.map(_python_worker, chunks))
 
 
 # ---------------------------------------------------------------------------
@@ -142,17 +133,9 @@ def compute_greeks_python(table):
 # ---------------------------------------------------------------------------
 
 
-def compute_greeks_quantlib(table):
-    """Row-by-row QuantLib BSM Greeks computation."""
-    n = table.num_rows
-    opt = table.column("option_type").to_pylist()
-    spot = table.column("spot").to_pylist()
-    strike = table.column("strike").to_pylist()
-    expiry = table.column("expiry").to_pylist()
-    rate = table.column("rate").to_pylist()
-    div = table.column("dividend_yield").to_pylist()
-    mkt = table.column("market_price").to_pylist()
-
+def compute_greeks_quantlib(opt, spot, strike, expiry, rate, div, mkt):
+    """Row-by-row QuantLib BSM Greeks computation on pre-extracted numpy arrays."""
+    n = len(opt)
     calendar = ql.NullCalendar()
     day_count = ql.Actual365Fixed()
     today = ql.Date.todaysDate()
@@ -162,7 +145,6 @@ def compute_greeks_quantlib(table):
         S, K, T, r, q, price = spot[i], strike[i], expiry[i], rate[i], div[i], mkt[i]
         option_type = ql.Option.Call if opt[i] == 1 else ql.Option.Put
 
-        # Maturity date from T in years
         maturity_days = max(int(round(T * 365)), 1)
         maturity = today + ql.Period(maturity_days, ql.Days)
 
@@ -185,13 +167,11 @@ def compute_greeks_quantlib(table):
             spot_handle, div_curve, rate_curve, vol_handle
         )
 
-        # Solve for IV
         try:
             sigma = option.impliedVolatility(price, process)
         except RuntimeError:
             continue
 
-        # Re-price with solved vol to extract Greeks
         solved_vol = ql.BlackVolTermStructureHandle(
             ql.BlackConstantVol(today, calendar, sigma, day_count)
         )
@@ -205,6 +185,29 @@ def compute_greeks_quantlib(table):
         option.vega()
         option.theta()
         option.rho()
+
+
+def _quantlib_worker(args):
+    """Worker for ProcessPoolExecutor — runs compute_greeks_quantlib on a chunk."""
+    opt, spot, strike, expiry, rate, div, mkt = args
+    compute_greeks_quantlib(opt, spot, strike, expiry, rate, div, mkt)
+
+
+def compute_greeks_quantlib_parallel(opt, spot, strike, expiry, rate, div, mkt):
+    """Parallel wrapper using ProcessPoolExecutor."""
+    ncpu = os.cpu_count() or 1
+    n = len(opt)
+    chunk_size = (n + ncpu - 1) // ncpu
+
+    chunks = []
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunks.append((opt[start:end], spot[start:end], strike[start:end],
+                        expiry[start:end], rate[start:end], div[start:end],
+                        mkt[start:end]))
+
+    with ProcessPoolExecutor(max_workers=ncpu) as pool:
+        list(pool.map(_quantlib_worker, chunks))
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +231,8 @@ def benchmark_fn(fn, *args, warmup=2, trials=10):
 def print_comparison_table(size, results, argiv_result):
     """Print a markdown table comparing libraries for a given dataset size."""
     print(f"\n### {size:,} rows\n")
-    print("| Library        |   Mean (s) |    Std (s) | Median (s) |    Min (s) |    Max (s) | vs argiv |")
-    print("|----------------|------------|------------|------------|------------|------------|----------|")
+    print("| Library                   |   Mean (s) |    Std (s) | Median (s) |    Min (s) |    Max (s) | vs argiv |")
+    print("|---------------------------|------------|------------|------------|------------|------------|----------|")
 
     for r in results:
         if r.library == "argiv":
@@ -237,7 +240,7 @@ def print_comparison_table(size, results, argiv_result):
         else:
             speedup_str = f"{r.median / argiv_result.median:>6.0f}x "
         print(
-            f"| {r.library:<14s} "
+            f"| {r.library:<25s} "
             f"| {r.mean:>10.4f} "
             f"| {r.std:>10.4f} "
             f"| {r.median:>10.4f} "
@@ -257,6 +260,7 @@ def main():
 
     # -- Header ----------------------------------------------------------------
     print("# argiv benchmark\n")
+    print(f"  CPU cores:      {os.cpu_count()}")
     print("  argiv:          installed")
     print("  Python (scipy): installed")
     print("  PyQuantLib:     installed")
@@ -274,24 +278,33 @@ def main():
     for n in sizes:
         print(f"generating dataset of size {n}...")
         table = generate_dataset(n)
+
+        # Pre-extract numpy arrays for the baselines (outside timed region)
+        opt = table.column("option_type").to_numpy()
+        spot = table.column("spot").to_numpy()
+        strike = table.column("strike").to_numpy()
+        expiry = table.column("expiry").to_numpy()
+        rate = table.column("rate").to_numpy()
+        div = table.column("dividend_yield").to_numpy()
+        mkt = table.column("market_price").to_numpy()
+
         results[n] = []
 
-        # argiv (always run)
+        # argiv (always run) — receives pa.Table since Arrow import is its interface
         print("running argiv...")
         times = benchmark_fn(argiv.compute_greeks, table, trials=trials)
         argiv_result = BenchmarkResult(library="argiv", size=n, times=times)
         results[n].append(argiv_result)
 
-        # Python/scipy baseline (skip at 100k)
+        # Python/scipy baseline (skip at 100k+)
         if n <= 1_000:
-            print("running Python (scipy)...")
-            times = benchmark_fn(compute_greeks_python, table, warmup=1, trials=trials)
-            results[n].append(BenchmarkResult(library="Python (scipy)", size=n, times=times))
+            print("running Python (scipy, parallel)...")
+            times = benchmark_fn(compute_greeks_python_parallel, opt, spot, strike, expiry, rate, div, mkt, warmup=1, trials=trials)
+            results[n].append(BenchmarkResult(library="Python (scipy, parallel)", size=n, times=times))
         if n <= 10_000:
-            print("running PyQuantLib...")
-            times = benchmark_fn(compute_greeks_quantlib, table, warmup=1, trials=trials)
-            results[n].append(BenchmarkResult(library="PyQuantLib", size=n, times=times))
-        
+            print("running PyQuantLib (parallel)...")
+            times = benchmark_fn(compute_greeks_quantlib_parallel, opt, spot, strike, expiry, rate, div, mkt, warmup=1, trials=trials)
+            results[n].append(BenchmarkResult(library="PyQuantLib (parallel)", size=n, times=times))
 
     for n, res in results.items():
         print_comparison_table(n, res, res[0])
