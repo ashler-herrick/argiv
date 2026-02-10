@@ -18,6 +18,9 @@ build-backend = "scikit_build_core.build"
 cmake.build-type = "Release"
 wheel.install-dir = "argiv"
 
+[tool.scikit-build.cmake.define]
+CMAKE_TOOLCHAIN_FILE = { env = "CMAKE_TOOLCHAIN_FILE" }
+
 [dependency-groups]
 dev = [
     "pybind11>=3.0.1",
