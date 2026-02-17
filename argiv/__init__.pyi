@@ -1,6 +1,6 @@
 import pyarrow as pa
 
-def compute_greeks(table: pa.Table) -> pa.Table: 
+def compute_greeks(table: pa.Table) -> pa.Table:
     """
     Computes the IV and first order Greeks plus Gamma for a pyarrow Table.
 
@@ -22,5 +22,60 @@ def compute_greeks(table: pa.Table) -> pa.Table:
             - theta (float64): Option theta
             - rho (float64): Option rho
 
+    """
+    ...
+
+def fit_vol_surface(
+    table: pa.Table,
+    delta_pillars: list[float] | None = None,
+) -> pa.Table:
+    """
+    Fit a vol surface via delta-space cubic spline interpolation.
+
+    Args:
+        table (pa.Table): Input Arrow Table with columns:
+            - iv (float64): Implied volatility
+            - delta (float64): Option delta
+            - timestamp (timestamp): Observation time
+            - expiration (date32): Option expiration date
+        delta_pillars (list[float] | None): Absolute delta percentages for
+            pillar points (default: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]).
+
+    Returns:
+        pa.Table: One row per (timestamp, expiration) group with columns:
+            - timestamp: Observation time
+            - expiration: Option expiration date
+            - iv_pNN (float64): Put IV at NN-delta
+            - iv_cNN (float64): Call IV at NN-delta
+    """
+    ...
+
+def compute_fit_vol_surface(
+    table: pa.Table,
+    delta_pillars: list[float] | None = None,
+) -> pa.Table:
+    """
+    Compute Greeks and fit a vol surface in one step.
+
+    Args:
+        table (pa.Table): Input Arrow Table with columns:
+            - option_type (int32): 1 for Call, -1 for Put
+            - spot (float64): Current price of the underlying asset
+            - strike (float64): Strike price of the option
+            - expiry (float64): Time to expiry in years
+            - rate (float64): Risk-free interest rate
+            - dividend_yield (float64): Dividend yield of the underlying asset
+            - market_price (float64): Market price of the option
+            - timestamp (timestamp): Observation time
+            - expiration (date32): Option expiration date
+        delta_pillars (list[float] | None): Absolute delta percentages for
+            pillar points (default: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]).
+
+    Returns:
+        pa.Table: One row per (timestamp, expiration) group with columns:
+            - timestamp: Observation time
+            - expiration: Option expiration date
+            - iv_pNN (float64): Put IV at NN-delta
+            - iv_cNN (float64): Call IV at NN-delta
     """
     ...

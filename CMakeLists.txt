@@ -12,6 +12,7 @@ pybind11_add_module(_core
     src/argiv/core.cpp
     src/argiv/arrow_interop.cpp
     src/argiv/compute.cpp
+    src/argiv/surface.cpp
     src/bindings/python_module.cpp
 )
 
