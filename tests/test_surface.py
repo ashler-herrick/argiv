@@ -3,6 +3,7 @@ import math
 
 import numpy as np
 import pyarrow as pa
+import pytest
 
 import argiv
 
@@ -44,7 +45,7 @@ def _generate_smile_options(S, T, r, q, base_sigma, skew_coeff, strikes, timesta
     options = []
     for K in strikes:
         sigma = base_sigma + skew_coeff * (K - S) ** 2
-        # Use puts for K < S, calls for K >= S
+        # Use puts for K < S, calls for K >= S (OTM convention)
         opt_type = -1 if K < S else 1
         price = _bs_price(opt_type, S, K, T, r, q, sigma)
         options.append({
@@ -108,6 +109,70 @@ class TestSyntheticSmile:
                 if val is not None:
                     assert abs(val - sigma) < 0.01, \
                         f"{col_name}={val} deviates from flat vol {sigma}"
+
+
+class TestATMVol:
+    """Test the ATM (iv_50) anchor computation."""
+
+    def test_atm_present(self):
+        """iv_50 column should always be in the output."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+        assert "iv_50" in result.column_names
+
+    def test_atm_convergence_flat_vol(self):
+        """With flat vol, iv_50 should match wing pillars."""
+        S, T, r, q = 100.0, 1.0, 0.05, 0.0
+        sigma = 0.25
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2025, 1, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        iv_50 = result.column("iv_50")[0].as_py()
+        assert iv_50 is not None, "iv_50 should not be null"
+        assert abs(iv_50 - sigma) < 0.01, f"iv_50={iv_50} deviates from {sigma}"
+
+    def test_atm_is_average(self):
+        """With a symmetric smile, iv_50 should be close to the ATM level."""
+        S, T, r, q = 100.0, 0.5, 0.05, 0.0
+        base_sigma = 0.25
+        skew_coeff = 0.0001
+        strikes = np.linspace(80, 120, 30)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, base_sigma, skew_coeff,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        iv_50 = result.column("iv_50")[0].as_py()
+        assert iv_50 is not None
+        # ATM vol should be close to base_sigma (the smile minimum is at S)
+        assert abs(iv_50 - base_sigma) < 0.02, \
+            f"iv_50={iv_50} too far from base_sigma={base_sigma}"
+
+    def test_no_p50_c50_columns(self):
+        """iv_p50 and iv_c50 should NOT exist in the output."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+        assert "iv_p50" not in result.column_names
+        assert "iv_c50" not in result.column_names
 
 
 class TestMultipleGroups:
@@ -182,7 +247,7 @@ class TestEdgeCases:
         assert result.num_rows == 1
 
         for col_name in result.column_names:
-            if col_name.startswith("iv_"):
+            if col_name.startswith("iv_") and col_name != "iv_50":
                 assert result.column(col_name)[0].as_py() is None, \
                     f"{col_name} should be null with single point"
 
@@ -205,16 +270,11 @@ class TestEdgeCases:
         table = _make_surface_table(options, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
         assert result.num_rows == 1
-        # Should have at least some non-null values between the two deltas
-        has_value = False
-        for col_name in result.column_names:
-            if col_name.startswith("iv_"):
-                val = result.column(col_name)[0].as_py()
-                if val is not None:
-                    has_value = True
-                    assert val > 0
-        # It's possible all pillars are out of range for just 2 points,
-        # but we should at least not crash
+        # Should have at least iv_50 populated
+        iv_50 = result.column("iv_50")[0].as_py()
+        # With only 2 points (one put, one call), ATM should be their average
+        if iv_50 is not None:
+            assert iv_50 > 0
 
     def test_empty_table(self):
         """Empty input returns 0-row table with correct schema."""
@@ -233,6 +293,7 @@ class TestEdgeCases:
         assert result.num_rows == 0
         assert "timestamp" in result.column_names
         assert "expiration" in result.column_names
+        assert "iv_50" in result.column_names
         assert "iv_p25" in result.column_names
         assert "iv_c25" in result.column_names
 
@@ -250,11 +311,12 @@ class TestCustomPillars:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table, delta_pillars=[10, 25])
 
-        # Should have exactly 4 IV columns: iv_p25, iv_p10, iv_c10, iv_c25
+        # Should have 5 IV columns: iv_p25, iv_p10, iv_50, iv_c10, iv_c25
         iv_cols = [c for c in result.column_names if c.startswith("iv_")]
-        assert len(iv_cols) == 4
+        assert len(iv_cols) == 5
         assert "iv_p25" in iv_cols
         assert "iv_p10" in iv_cols
+        assert "iv_50" in iv_cols
         assert "iv_c10" in iv_cols
         assert "iv_c25" in iv_cols
 
@@ -269,9 +331,41 @@ class TestCustomPillars:
         result = argiv.compute_fit_vol_surface(table, delta_pillars=[25])
 
         iv_cols = [c for c in result.column_names if c.startswith("iv_")]
-        assert len(iv_cols) == 2
+        assert len(iv_cols) == 3
         assert "iv_p25" in iv_cols
+        assert "iv_50" in iv_cols
         assert "iv_c25" in iv_cols
+
+    def test_pillars_must_be_below_50(self):
+        """Passing delta_pillars containing 50 should raise."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        with pytest.raises(RuntimeError, match="must be < 50"):
+            argiv.compute_fit_vol_surface(table, delta_pillars=[25, 50])
+
+
+class TestOptionTypeRequired:
+    """Test that fit_vol_surface requires option_type column."""
+
+    def test_missing_option_type_raises(self):
+        """fit_vol_surface should raise if option_type is missing."""
+        table = pa.table({
+            "iv": pa.array([0.2, 0.25], type=pa.float64()),
+            "delta": pa.array([-0.3, 0.3], type=pa.float64()),
+            "timestamp": pa.array(
+                [datetime.datetime(2024, 1, 15, 10, 0, 0)] * 2,
+                type=pa.timestamp("us")),
+            "expiration": pa.array(
+                [datetime.date(2024, 7, 15)] * 2,
+                type=pa.date32()),
+        })
+        with pytest.raises(RuntimeError, match="Missing column: option_type"):
+            argiv.fit_vol_surface(table)
 
 
 class TestOutputSchema:
@@ -288,10 +382,11 @@ class TestOutputSchema:
         result = argiv.compute_fit_vol_surface(table)
 
         expected_cols = ["timestamp", "expiration",
-                         "iv_p50", "iv_p45", "iv_p40", "iv_p35", "iv_p30",
+                         "iv_p45", "iv_p40", "iv_p35", "iv_p30",
                          "iv_p25", "iv_p20", "iv_p15", "iv_p10", "iv_p5",
+                         "iv_50",
                          "iv_c5", "iv_c10", "iv_c15", "iv_c20", "iv_c25",
-                         "iv_c30", "iv_c35", "iv_c40", "iv_c45", "iv_c50"]
+                         "iv_c30", "iv_c35", "iv_c40", "iv_c45"]
         assert result.column_names == expected_cols
 
     def test_timestamp_type_preserved(self):

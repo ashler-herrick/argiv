@@ -54,20 +54,23 @@ PYBIND11_MODULE(_core, m) {
             return argiv::export_table(result);
         },
         py::arg("table"), py::arg("delta_pillars") = py::none(),
-        R"(Fit a vol surface via delta-space cubic spline interpolation.
+        R"(Fit a vol surface using OTM options with a shared ATM anchor.
 
         Parameters
         ----------
         table : pyarrow.Table
             Must contain columns: iv (float64), delta (float64),
+            option_type (int32, 1=call/-1=put),
             timestamp (timestamp), expiration (date32).
         delta_pillars : list of float, optional
-            Absolute delta percentages for pillar points (default: [5,10,...,50]).
+            Wing delta percentages, must be < 50 (default: [5,10,...,45]).
+            ATM (iv_50) is always computed automatically.
 
         Returns
         -------
         pyarrow.Table
-            One row per (timestamp, expiration) group with iv_pNN and iv_cNN columns.
+            One row per (timestamp, expiration) group with iv_pNN wing columns,
+            a single iv_50 ATM column, and iv_cNN wing columns.
         )");
 
     m.def(
@@ -98,11 +101,13 @@ PYBIND11_MODULE(_core, m) {
             spot, strike, expiry, rate, dividend_yield, market_price (all float64),
             timestamp (timestamp), expiration (date32).
         delta_pillars : list of float, optional
-            Absolute delta percentages for pillar points (default: [5,10,...,50]).
+            Wing delta percentages, must be < 50 (default: [5,10,...,45]).
+            ATM (iv_50) is always computed automatically.
 
         Returns
         -------
         pyarrow.Table
-            One row per (timestamp, expiration) group with iv_pNN and iv_cNN columns.
+            One row per (timestamp, expiration) group with iv_pNN wing columns,
+            a single iv_50 ATM column, and iv_cNN wing columns.
         )");
 }

@@ -65,21 +65,6 @@ sudo apt-get install libquantlib0-dev libarrow-dev
 brew install quantlib apache-arrow
 ```
 
-### Build and Install
-
-Once dependencies are installed:
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/argiv.git
-cd argiv
-
-# Install with uv (recommended) or pip
-uv pip install -e .
-
-# Or with pip
-pip install -e .
-```
 
 ### Troubleshooting
 
