@@ -32,6 +32,15 @@ const int32_t* get_int_col(const std::shared_ptr<arrow::Table>& table,
     return arr->raw_values();
 }
 
+// Optional column accessor (returns nullptr if column not present).
+const double* try_get_double_col(const std::shared_ptr<arrow::Table>& table,
+                                 const std::string& name) {
+    auto col = table->GetColumnByName(name);
+    if (!col) return nullptr;
+    auto arr = std::static_pointer_cast<arrow::DoubleArray>(col->chunk(0));
+    return arr->raw_values();
+}
+
 }  // namespace
 
 std::shared_ptr<arrow::Table> compute_greeks_table(
@@ -46,6 +55,11 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
     auto table = combined_result.MoveValueUnsafe();
     const int64_t n = table->num_rows();
 
+    // Detect optional bid/ask columns
+    const double* bid_price_col = try_get_double_col(table, "bid_price");
+    const double* ask_price_col = try_get_double_col(table, "ask_price");
+    const bool has_bid_ask = (bid_price_col != nullptr && ask_price_col != nullptr);
+
     // Handle empty table
     if (n == 0) {
         auto result = table;
@@ -55,6 +69,15 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
             result = *result->AddColumn(result->num_columns(),
                                         arrow::field(name, arrow::float64()),
                                         empty_chunked);
+        }
+        if (has_bid_ask) {
+            for (const auto& name : {"iv_bid", "iv_ask"}) {
+                auto empty_arr = std::make_shared<arrow::DoubleArray>(0, nullptr);
+                auto empty_chunked = std::make_shared<arrow::ChunkedArray>(empty_arr);
+                result = *result->AddColumn(result->num_columns(),
+                                            arrow::field(name, arrow::float64()),
+                                            empty_chunked);
+            }
         }
         return result;
     }
@@ -70,6 +93,11 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
 
     // Pre-allocate output vectors
     std::vector<double> iv(n), delta(n), gamma(n), vega(n), theta(n), rho(n);
+    std::vector<double> iv_bid, iv_ask;
+    if (has_bid_ask) {
+        iv_bid.resize(n);
+        iv_ask.resize(n);
+    }
 
     // Parallel computation
     #pragma omp parallel for schedule(dynamic, 256)
@@ -83,6 +111,15 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
         vega[i] = res.vega;
         theta[i] = res.theta;
         rho[i] = res.rho;
+
+        if (has_bid_ask) {
+            iv_bid[i] = compute_single(option_type[i], spot[i], strike[i],
+                                       expiry[i], rate[i], dividend_yield[i],
+                                       bid_price_col[i]).iv;
+            iv_ask[i] = compute_single(option_type[i], spot[i], strike[i],
+                                       expiry[i], rate[i], dividend_yield[i],
+                                       ask_price_col[i]).iv;
+        }
     }
 
     // Build output columns
@@ -122,6 +159,15 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
     result = *result->AddColumn(result->num_columns(),
                                 arrow::field("rho", arrow::float64()),
                                 build_col("rho", rho));
+
+    if (has_bid_ask) {
+        result = *result->AddColumn(result->num_columns(),
+                                    arrow::field("iv_bid", arrow::float64()),
+                                    build_col("iv_bid", iv_bid));
+        result = *result->AddColumn(result->num_columns(),
+                                    arrow::field("iv_ask", arrow::float64()),
+                                    build_col("iv_ask", iv_ask));
+    }
 
     return result;
 }

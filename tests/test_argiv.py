@@ -107,6 +107,48 @@ class TestGreeksSigns:
         assert rho < 0, f"Put rho should be negative, got {rho}"
 
 
+class TestBidAskIV:
+    """Test bid/ask IV computation."""
+
+    def test_bid_ask_iv_computed(self):
+        """iv_bid < iv < iv_ask when bid < mid < ask."""
+        S, K, T, r, q, sigma = 100.0, 100.0, 1.0, 0.05, 0.0, 0.20
+        mid = _bs_call_price(S, K, T, r, q, sigma)
+        bid = _bs_call_price(S, K, T, r, q, sigma - 0.02)
+        ask = _bs_call_price(S, K, T, r, q, sigma + 0.02)
+
+        table = pa.table({
+            "option_type": pa.array([1], type=pa.int32()),
+            "spot": pa.array([S], type=pa.float64()),
+            "strike": pa.array([K], type=pa.float64()),
+            "expiry": pa.array([T], type=pa.float64()),
+            "rate": pa.array([r], type=pa.float64()),
+            "dividend_yield": pa.array([q], type=pa.float64()),
+            "market_price": pa.array([mid], type=pa.float64()),
+            "bid_price": pa.array([bid], type=pa.float64()),
+            "ask_price": pa.array([ask], type=pa.float64()),
+        })
+        result = argiv.compute_greeks(table)
+
+        iv = result.column("iv")[0].as_py()
+        iv_bid = result.column("iv_bid")[0].as_py()
+        iv_ask = result.column("iv_ask")[0].as_py()
+
+        assert iv_bid < iv < iv_ask
+        assert abs(iv - sigma) < 1e-4
+        assert abs(iv_bid - (sigma - 0.02)) < 1e-4
+        assert abs(iv_ask - (sigma + 0.02)) < 1e-4
+
+    def test_no_bid_ask_unchanged(self):
+        """Without bid/ask columns, output has no iv_bid/iv_ask."""
+        S, K, T, r, q, sigma = 100.0, 100.0, 1.0, 0.05, 0.0, 0.2
+        price = _bs_call_price(S, K, T, r, q, sigma)
+        table = _make_table(1, S, K, T, r, q, price)
+        result = argiv.compute_greeks(table)
+        assert "iv_bid" not in result.column_names
+        assert "iv_ask" not in result.column_names
+
+
 class TestMultiRow:
     """Test batch computation with multiple rows."""
 

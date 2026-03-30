@@ -17,10 +17,12 @@ struct SurfaceConfig {
 //
 // Input table must contain: iv (float64), delta (float64),
 // option_type (int32, 1=call/-1=put), timestamp (timestamp), expiration (date32).
+// Optional: spot (float64), strike (float64) — used to compute log_moneyness.
 //
-// Returns a table with one row per (timestamp, expiration) group, containing
-// the grouping columns, iv_pNN wing columns, a single iv_50 ATM column,
-// and iv_cNN wing columns.
+// Returns an unpivoted table with one row per (timestamp, expiration, delta)
+// combination. Columns: timestamp, expiration, delta (float64, signed:
+// negative for puts, positive for calls, 0.50 for ATM), iv (float64),
+// log_moneyness (float64, log(K/S) — null if spot/strike not in input).
 std::shared_ptr<arrow::Table> fit_vol_surface_table(
     const std::shared_ptr<arrow::Table>& input,
     const SurfaceConfig& config = SurfaceConfig{});

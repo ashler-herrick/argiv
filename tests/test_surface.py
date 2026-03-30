@@ -21,11 +21,7 @@ def _bs_price(option_type, S, K, T, r, q, sigma):
 
 
 def _make_surface_table(options, timestamp, expiration_date):
-    """Build a surface input table from a list of option dicts.
-
-    Each dict should have: option_type, spot, strike, expiry, rate,
-    dividend_yield, market_price.
-    """
+    """Build a surface input table from a list of option dicts."""
     n = len(options)
     return pa.table({
         "option_type": pa.array([o["option_type"] for o in options], type=pa.int32()),
@@ -45,7 +41,6 @@ def _generate_smile_options(S, T, r, q, base_sigma, skew_coeff, strikes, timesta
     options = []
     for K in strikes:
         sigma = base_sigma + skew_coeff * (K - S) ** 2
-        # Use puts for K < S, calls for K >= S (OTM convention)
         opt_type = -1 if K < S else 1
         price = _bs_price(opt_type, S, K, T, r, q, sigma)
         options.append({
@@ -58,6 +53,29 @@ def _generate_smile_options(S, T, r, q, base_sigma, skew_coeff, strikes, timesta
             "market_price": price,
         })
     return _make_surface_table(options, timestamp, expiration_date)
+
+
+def _get_iv_at_delta(result, target_delta, tol=1e-9):
+    """Get the IV value from the result table at the given signed delta."""
+    deltas = result.column("delta").to_pylist()
+    ivs = result.column("iv").to_pylist()
+    for d, v in zip(deltas, ivs):
+        if abs(d - target_delta) < tol:
+            return v
+    return None
+
+
+def _get_row_at_delta(result, target_delta, tol=1e-9):
+    """Get all column values from the result table at the given signed delta."""
+    deltas = result.column("delta").to_pylist()
+    for i, d in enumerate(deltas):
+        if abs(d - target_delta) < tol:
+            return {col: result.column(col)[i].as_py() for col in result.column_names}
+    return None
+
+
+# Default config: 9 wing pillars -> 9 put + ATM + 9 call = 19 rows per group
+DEFAULT_PILLARS_PER_GROUP = 19
 
 
 class TestSyntheticSmile:
@@ -75,18 +93,14 @@ class TestSyntheticSmile:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
 
-        assert result.num_rows == 1
-        assert result.column("timestamp")[0].as_py() == ts
-        assert result.column("expiration")[0].as_py() == exp
+        assert result.num_rows == DEFAULT_PILLARS_PER_GROUP
+        assert result.column_names == ["timestamp", "expiration", "delta", "iv", "log_moneyness"]
 
-        # Check that at least 25-delta put and call pillars are populated
-        iv_p25 = result.column("iv_p25")[0].as_py()
-        iv_c25 = result.column("iv_c25")[0].as_py()
-        assert iv_p25 is not None, "iv_p25 should not be null"
-        assert iv_c25 is not None, "iv_c25 should not be null"
-
-        # The smile is symmetric around ATM, so these should be close to
-        # base_sigma (within the smile curvature)
+        # Check 25-delta put and call
+        iv_p25 = _get_iv_at_delta(result, -0.25)
+        iv_c25 = _get_iv_at_delta(result, 0.25)
+        assert iv_p25 is not None, "iv at delta=-0.25 should not be null"
+        assert iv_c25 is not None, "iv at delta=0.25 should not be null"
         assert 0.15 < iv_p25 < 0.35, f"iv_p25={iv_p25} out of reasonable range"
         assert 0.15 < iv_c25 < 0.35, f"iv_c25={iv_c25} out of reasonable range"
 
@@ -102,20 +116,18 @@ class TestSyntheticSmile:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
 
-        # All non-null pillar IVs should be close to sigma
-        for col_name in result.column_names:
-            if col_name.startswith("iv_"):
-                val = result.column(col_name)[0].as_py()
-                if val is not None:
-                    assert abs(val - sigma) < 0.01, \
-                        f"{col_name}={val} deviates from flat vol {sigma}"
+        ivs = result.column("iv").to_pylist()
+        for i, val in enumerate(ivs):
+            if val is not None:
+                assert abs(val - sigma) < 0.01, \
+                    f"Row {i}: iv={val} deviates from flat vol {sigma}"
 
 
 class TestATMVol:
-    """Test the ATM (iv_50) anchor computation."""
+    """Test the ATM (delta=0.50) anchor computation."""
 
     def test_atm_present(self):
-        """iv_50 column should always be in the output."""
+        """A row with delta=0.50 should always be in the output."""
         S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
         strikes = np.linspace(85, 115, 25)
         ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
@@ -124,10 +136,12 @@ class TestATMVol:
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
-        assert "iv_50" in result.column_names
+
+        deltas = result.column("delta").to_pylist()
+        assert 0.50 in deltas
 
     def test_atm_convergence_flat_vol(self):
-        """With flat vol, iv_50 should match wing pillars."""
+        """With flat vol, ATM IV should match wing pillars."""
         S, T, r, q = 100.0, 1.0, 0.05, 0.0
         sigma = 0.25
         strikes = np.linspace(85, 115, 25)
@@ -138,12 +152,12 @@ class TestATMVol:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
 
-        iv_50 = result.column("iv_50")[0].as_py()
-        assert iv_50 is not None, "iv_50 should not be null"
-        assert abs(iv_50 - sigma) < 0.01, f"iv_50={iv_50} deviates from {sigma}"
+        iv_atm = _get_iv_at_delta(result, 0.50)
+        assert iv_atm is not None, "ATM iv should not be null"
+        assert abs(iv_atm - sigma) < 0.01, f"iv_atm={iv_atm} deviates from {sigma}"
 
     def test_atm_is_average(self):
-        """With a symmetric smile, iv_50 should be close to the ATM level."""
+        """With a symmetric smile, ATM IV should be close to the base level."""
         S, T, r, q = 100.0, 0.5, 0.05, 0.0
         base_sigma = 0.25
         skew_coeff = 0.0001
@@ -155,14 +169,13 @@ class TestATMVol:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
 
-        iv_50 = result.column("iv_50")[0].as_py()
-        assert iv_50 is not None
-        # ATM vol should be close to base_sigma (the smile minimum is at S)
-        assert abs(iv_50 - base_sigma) < 0.02, \
-            f"iv_50={iv_50} too far from base_sigma={base_sigma}"
+        iv_atm = _get_iv_at_delta(result, 0.50)
+        assert iv_atm is not None
+        assert abs(iv_atm - base_sigma) < 0.02, \
+            f"iv_atm={iv_atm} too far from base_sigma={base_sigma}"
 
-    def test_no_p50_c50_columns(self):
-        """iv_p50 and iv_c50 should NOT exist in the output."""
+    def test_no_negative_50_delta(self):
+        """No row should have delta=-0.50 (ATM is 0.50, not a put wing)."""
         S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
         strikes = np.linspace(85, 115, 25)
         ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
@@ -171,8 +184,9 @@ class TestATMVol:
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
-        assert "iv_p50" not in result.column_names
-        assert "iv_c50" not in result.column_names
+
+        deltas = result.column("delta").to_pylist()
+        assert -0.50 not in deltas
 
 
 class TestMultipleGroups:
@@ -190,7 +204,7 @@ class TestMultipleGroups:
         combined = pa.concat_tables([t1, t2])
 
         result = argiv.compute_fit_vol_surface(combined)
-        assert result.num_rows == 2
+        assert result.num_rows == 2 * DEFAULT_PILLARS_PER_GROUP
 
         exps = result.column("expiration").to_pylist()
         assert exp1 in exps
@@ -208,7 +222,7 @@ class TestMultipleGroups:
         combined = pa.concat_tables([t1, t2])
 
         result = argiv.compute_fit_vol_surface(combined)
-        assert result.num_rows == 2
+        assert result.num_rows == 2 * DEFAULT_PILLARS_PER_GROUP
 
     def test_three_groups(self):
         S, r, q, sigma = 100.0, 0.05, 0.0, 0.20
@@ -225,14 +239,14 @@ class TestMultipleGroups:
         combined = pa.concat_tables(tables)
 
         result = argiv.compute_fit_vol_surface(combined)
-        assert result.num_rows == 3
+        assert result.num_rows == 3 * DEFAULT_PILLARS_PER_GROUP
 
 
 class TestEdgeCases:
     """Test edge cases: few points, empty table, out-of-range pillars."""
 
     def test_single_option_all_nan(self):
-        """A single option per group gives <2 points, all pillars should be null."""
+        """A single option per group gives <2 points, all wing IVs should be null."""
         S, K, T, r, q, sigma = 100.0, 100.0, 0.5, 0.05, 0.0, 0.20
         price = _bs_price(1, S, K, T, r, q, sigma)
         ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
@@ -244,12 +258,13 @@ class TestEdgeCases:
             ts, exp,
         )
         result = argiv.compute_fit_vol_surface(table)
-        assert result.num_rows == 1
+        assert result.num_rows == DEFAULT_PILLARS_PER_GROUP
 
-        for col_name in result.column_names:
-            if col_name.startswith("iv_") and col_name != "iv_50":
-                assert result.column(col_name)[0].as_py() is None, \
-                    f"{col_name} should be null with single point"
+        ivs = result.column("iv").to_pylist()
+        deltas = result.column("delta").to_pylist()
+        for d, v in zip(deltas, ivs):
+            if abs(d - 0.50) > 1e-9:
+                assert v is None, f"iv at delta={d} should be null with single point"
 
     def test_two_points_linear(self):
         """Two options should use linear interpolation."""
@@ -269,12 +284,11 @@ class TestEdgeCases:
 
         table = _make_surface_table(options, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
-        assert result.num_rows == 1
-        # Should have at least iv_50 populated
-        iv_50 = result.column("iv_50")[0].as_py()
-        # With only 2 points (one put, one call), ATM should be their average
-        if iv_50 is not None:
-            assert iv_50 > 0
+        assert result.num_rows == DEFAULT_PILLARS_PER_GROUP
+
+        iv_atm = _get_iv_at_delta(result, 0.50)
+        if iv_atm is not None:
+            assert iv_atm > 0
 
     def test_empty_table(self):
         """Empty input returns 0-row table with correct schema."""
@@ -291,11 +305,7 @@ class TestEdgeCases:
         })
         result = argiv.compute_fit_vol_surface(table)
         assert result.num_rows == 0
-        assert "timestamp" in result.column_names
-        assert "expiration" in result.column_names
-        assert "iv_50" in result.column_names
-        assert "iv_p25" in result.column_names
-        assert "iv_c25" in result.column_names
+        assert result.column_names == ["timestamp", "expiration", "delta", "iv", "log_moneyness"]
 
 
 class TestCustomPillars:
@@ -311,14 +321,10 @@ class TestCustomPillars:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table, delta_pillars=[10, 25])
 
-        # Should have 5 IV columns: iv_p25, iv_p10, iv_50, iv_c10, iv_c25
-        iv_cols = [c for c in result.column_names if c.startswith("iv_")]
-        assert len(iv_cols) == 5
-        assert "iv_p25" in iv_cols
-        assert "iv_p10" in iv_cols
-        assert "iv_50" in iv_cols
-        assert "iv_c10" in iv_cols
-        assert "iv_c25" in iv_cols
+        # 2 put + ATM + 2 call = 5 rows
+        assert result.num_rows == 5
+        deltas = sorted(result.column("delta").to_pylist())
+        assert deltas == pytest.approx([-0.25, -0.10, 0.10, 0.25, 0.50])
 
     def test_single_pillar(self):
         S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
@@ -330,11 +336,9 @@ class TestCustomPillars:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table, delta_pillars=[25])
 
-        iv_cols = [c for c in result.column_names if c.startswith("iv_")]
-        assert len(iv_cols) == 3
-        assert "iv_p25" in iv_cols
-        assert "iv_50" in iv_cols
-        assert "iv_c25" in iv_cols
+        assert result.num_rows == 3
+        deltas = sorted(result.column("delta").to_pylist())
+        assert deltas == pytest.approx([-0.25, 0.25, 0.50])
 
     def test_pillars_must_be_below_50(self):
         """Passing delta_pillars containing 50 should raise."""
@@ -371,7 +375,7 @@ class TestOptionTypeRequired:
 class TestOutputSchema:
     """Test that output schema is correct."""
 
-    def test_column_order(self):
+    def test_column_names(self):
         S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
         strikes = np.linspace(85, 115, 20)
         ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
@@ -381,13 +385,24 @@ class TestOutputSchema:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
 
-        expected_cols = ["timestamp", "expiration",
-                         "iv_p45", "iv_p40", "iv_p35", "iv_p30",
-                         "iv_p25", "iv_p20", "iv_p15", "iv_p10", "iv_p5",
-                         "iv_50",
-                         "iv_c5", "iv_c10", "iv_c15", "iv_c20", "iv_c25",
-                         "iv_c30", "iv_c35", "iv_c40", "iv_c45"]
-        assert result.column_names == expected_cols
+        assert result.column_names == ["timestamp", "expiration", "delta", "iv", "log_moneyness"]
+
+    def test_delta_ordering(self):
+        """Within a group, deltas should be ordered: puts descending, ATM, calls ascending."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
+        strikes = np.linspace(85, 115, 20)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        deltas = result.column("delta").to_pylist()
+        expected = [-0.45, -0.40, -0.35, -0.30, -0.25, -0.20, -0.15, -0.10, -0.05,
+                    0.50,
+                    0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45]
+        assert deltas == pytest.approx(expected)
 
     def test_timestamp_type_preserved(self):
         """Output timestamp type should match input."""
@@ -414,3 +429,146 @@ class TestOutputSchema:
             result = argiv.compute_fit_vol_surface(table)
             assert result.schema.field("timestamp").type == pa.timestamp(unit), \
                 f"Timestamp type mismatch for unit={unit}"
+
+
+class TestLogMoneyness:
+    """Test log moneyness computation."""
+
+    def test_log_moneyness_populated(self):
+        """compute_fit_vol_surface should populate log_moneyness."""
+        S, T, r, q = 100.0, 0.5, 0.05, 0.0
+        sigma = 0.25
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        # ATM log_moneyness should be near 0
+        atm_row = _get_row_at_delta(result, 0.50)
+        assert atm_row is not None
+        lm_atm = atm_row["log_moneyness"]
+        assert lm_atm is not None, "ATM log_moneyness should not be null"
+        assert abs(lm_atm) < 0.1, f"ATM log_moneyness={lm_atm} should be near 0"
+
+        # Put side should have negative log_moneyness (K < S for OTM puts)
+        lm_p25 = _get_row_at_delta(result, -0.25)
+        if lm_p25 and lm_p25["log_moneyness"] is not None:
+            assert lm_p25["log_moneyness"] < 0, \
+                f"Put log_moneyness={lm_p25['log_moneyness']} should be negative"
+
+        # Call side should have positive log_moneyness (K > S for OTM calls)
+        lm_c25 = _get_row_at_delta(result, 0.25)
+        if lm_c25 and lm_c25["log_moneyness"] is not None:
+            assert lm_c25["log_moneyness"] > 0, \
+                f"Call log_moneyness={lm_c25['log_moneyness']} should be positive"
+
+    def test_log_moneyness_null_without_spot_strike(self):
+        """fit_vol_surface without spot/strike should have null log_moneyness."""
+        table = pa.table({
+            "iv": pa.array([0.20, 0.22, 0.25, 0.22, 0.20], type=pa.float64()),
+            "delta": pa.array([-0.10, -0.30, -0.45, 0.30, 0.10], type=pa.float64()),
+            "option_type": pa.array([-1, -1, -1, 1, 1], type=pa.int32()),
+            "timestamp": pa.array(
+                [datetime.datetime(2024, 1, 15, 10, 0, 0)] * 5,
+                type=pa.timestamp("us")),
+            "expiration": pa.array(
+                [datetime.date(2024, 7, 15)] * 5,
+                type=pa.date32()),
+        })
+        result = argiv.fit_vol_surface(table)
+
+        lm_values = result.column("log_moneyness").to_pylist()
+        assert all(v is None for v in lm_values), \
+            "log_moneyness should be all null without spot/strike"
+
+
+class TestBidAskSurface:
+    """Test bid/ask IV bounds in the vol surface."""
+
+    def _generate_bid_ask_options(self, S, T, r, q, sigma, strikes, ts, exp,
+                                  spread_sigma=0.02):
+        """Generate options with bid/ask prices (mid ± spread in vol space)."""
+        options = {
+            "option_type": [], "spot": [], "strike": [], "expiry": [],
+            "rate": [], "dividend_yield": [],
+            "market_price": [], "bid_price": [], "ask_price": [],
+        }
+        for K in strikes:
+            opt_type = -1 if K < S else 1
+            mid = _bs_price(opt_type, S, K, T, r, q, sigma)
+            bid = _bs_price(opt_type, S, K, T, r, q, sigma - spread_sigma)
+            ask = _bs_price(opt_type, S, K, T, r, q, sigma + spread_sigma)
+            options["option_type"].append(opt_type)
+            options["spot"].append(S)
+            options["strike"].append(K)
+            options["expiry"].append(T)
+            options["rate"].append(r)
+            options["dividend_yield"].append(q)
+            options["market_price"].append(mid)
+            options["bid_price"].append(max(bid, 1e-10))
+            options["ask_price"].append(ask)
+        n = len(strikes)
+        return pa.table({
+            "option_type": pa.array(options["option_type"], type=pa.int32()),
+            "spot": pa.array(options["spot"], type=pa.float64()),
+            "strike": pa.array(options["strike"], type=pa.float64()),
+            "expiry": pa.array(options["expiry"], type=pa.float64()),
+            "rate": pa.array(options["rate"], type=pa.float64()),
+            "dividend_yield": pa.array(options["dividend_yield"], type=pa.float64()),
+            "market_price": pa.array(options["market_price"], type=pa.float64()),
+            "bid_price": pa.array(options["bid_price"], type=pa.float64()),
+            "ask_price": pa.array(options["ask_price"], type=pa.float64()),
+            "timestamp": pa.array([ts] * n, type=pa.timestamp("us")),
+            "expiration": pa.array([exp] * n, type=pa.date32()),
+        })
+
+    def test_surface_bid_ask_schema(self):
+        """Output should have iv_bid and iv_ask columns when bid/ask provided."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = self._generate_bid_ask_options(S, T, r, q, sigma, strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        assert "iv_bid" in result.column_names
+        assert "iv_ask" in result.column_names
+
+    def test_surface_bid_ask_bands(self):
+        """iv_bid <= iv <= iv_ask at each pillar delta."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.25
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = self._generate_bid_ask_options(S, T, r, q, sigma, strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        ivs = result.column("iv").to_pylist()
+        iv_bids = result.column("iv_bid").to_pylist()
+        iv_asks = result.column("iv_ask").to_pylist()
+
+        for i in range(result.num_rows):
+            if ivs[i] is None or iv_bids[i] is None or iv_asks[i] is None:
+                continue
+            assert iv_bids[i] <= ivs[i] + 1e-6, \
+                f"Row {i}: iv_bid={iv_bids[i]} > iv={ivs[i]}"
+            assert ivs[i] <= iv_asks[i] + 1e-6, \
+                f"Row {i}: iv={ivs[i]} > iv_ask={iv_asks[i]}"
+
+    def test_surface_no_bid_ask_unchanged(self):
+        """Without bid/ask, output should not have iv_bid/iv_ask."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0, strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        assert "iv_bid" not in result.column_names
+        assert "iv_ask" not in result.column_names

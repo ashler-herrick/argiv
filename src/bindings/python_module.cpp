@@ -29,11 +29,13 @@ PYBIND11_MODULE(_core, m) {
         table : pyarrow.Table
             Must contain columns: option_type (int32, 1=call/-1=put),
             spot, strike, expiry, rate, dividend_yield, market_price (all float64).
+            Optional: bid_price, ask_price (float64) for bid/ask IV bounds.
 
         Returns
         -------
         pyarrow.Table
             Input columns plus: iv, delta, gamma, vega, theta, rho.
+            If bid_price and ask_price are present: also iv_bid, iv_ask.
         )");
 
     m.def(
@@ -62,15 +64,18 @@ PYBIND11_MODULE(_core, m) {
             Must contain columns: iv (float64), delta (float64),
             option_type (int32, 1=call/-1=put),
             timestamp (timestamp), expiration (date32).
+            Optional: spot (float64), strike (float64) for log_moneyness.
+            Optional: iv_bid, iv_ask (float64) for bid/ask IV surface bounds.
         delta_pillars : list of float, optional
             Wing delta percentages, must be < 50 (default: [5,10,...,45]).
-            ATM (iv_50) is always computed automatically.
+            ATM (delta=0.50) is always computed automatically.
 
         Returns
         -------
         pyarrow.Table
-            One row per (timestamp, expiration) group with iv_pNN wing columns,
-            a single iv_50 ATM column, and iv_cNN wing columns.
+            One row per (timestamp, expiration, delta) with columns:
+            timestamp, expiration, delta (signed), iv, log_moneyness.
+            If iv_bid and iv_ask are present: also iv_bid, iv_ask.
         )");
 
     m.def(
@@ -100,14 +105,16 @@ PYBIND11_MODULE(_core, m) {
             Must contain columns: option_type (int32, 1=call/-1=put),
             spot, strike, expiry, rate, dividend_yield, market_price (all float64),
             timestamp (timestamp), expiration (date32).
+            Optional: bid_price, ask_price (float64) for bid/ask IV bounds.
         delta_pillars : list of float, optional
             Wing delta percentages, must be < 50 (default: [5,10,...,45]).
-            ATM (iv_50) is always computed automatically.
+            ATM (delta=0.50) is always computed automatically.
 
         Returns
         -------
         pyarrow.Table
-            One row per (timestamp, expiration) group with iv_pNN wing columns,
-            a single iv_50 ATM column, and iv_cNN wing columns.
+            One row per (timestamp, expiration, delta) with columns:
+            timestamp, expiration, delta (signed), iv, log_moneyness.
+            If bid_price and ask_price are present: also iv_bid, iv_ask.
         )");
 }
