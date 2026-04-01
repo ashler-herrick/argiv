@@ -392,7 +392,7 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
             double m0 = 0.0;
 
             auto endCrit = QuantLib::ext::make_shared<QuantLib::EndCriteria>(
-                1000, 100, 1e-8, 1e-8, 1e-8);
+                200, 40, 1e-6, 1e-6, 1e-6);
             auto optMethod =
                 QuantLib::ext::make_shared<QuantLib::LevenbergMarquardt>();
 
@@ -401,7 +401,8 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
                 group_T, forward,
                 a0, b0, sigma0, rho0, m0,
                 false, false, false, false, false,
-                true, endCrit, optMethod);
+                true, endCrit, optMethod,
+                0.0020, false, 5);
 
             if (!try_fit_svi(strikes, ivs, group_T, forward, svi))
                 continue;
@@ -452,6 +453,11 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
             if (has_bid_ask) {
                 // Helper: fit SVI for bid or ask, write results at same
                 // put/call strike layout already computed above.
+                // Use fitted mid params as warm start for bid/ask
+                double mid_a = svi.a(), mid_b = svi.b();
+                double mid_sig = svi.sigma(), mid_rho = svi.rho();
+                double mid_m = svi.m();
+
                 auto fit_bid_ask_svi = [&](
                     std::vector<std::pair<double, double>>& raw_points,
                     std::vector<double>& out_vec) {
@@ -462,13 +468,13 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
                     dedup_sorted_pairs(ba_strikes, ba_ivs, raw_points);
                     if (ba_strikes.size() < 5) return;
 
-                    double ba_a0 = atm_iv_guess * atm_iv_guess * group_T;
                     QuantLib::SviInterpolation ba_svi(
                         ba_strikes.begin(), ba_strikes.end(), ba_ivs.begin(),
                         group_T, forward,
-                        ba_a0, b0, sigma0, rho0, m0,
+                        mid_a, mid_b, mid_sig, mid_rho, mid_m,
                         false, false, false, false, false,
-                        true, endCrit, optMethod);
+                        true, endCrit, optMethod,
+                        0.0020, false, 3);
                     if (!try_fit_svi(ba_strikes, ba_ivs, group_T, forward,
                                      ba_svi))
                         return;
