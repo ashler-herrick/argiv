@@ -98,27 +98,32 @@ def compute_greeks(table: pa.Table) -> pa.Table:
 
 # -- fit_vol_surface -----------------------------------------------------------
 
-_SURFACE_REQUIRED = ["iv", "delta", "option_type", "timestamp", "expiration"]
+_SURFACE_REQUIRED = [
+    "iv", "option_type", "timestamp", "expiration",
+    "spot", "strike", "expiry",
+]
 
 _SURFACE_TYPES: dict[str, pa.DataType] = {
     "iv": pa.float64(),
-    "delta": pa.float64(),
     "option_type": pa.int32(),
+    "spot": pa.float64(),
+    "strike": pa.float64(),
+    "expiry": pa.float64(),
 }
 
-_SURFACE_OPTIONAL_DOUBLE = ["spot", "strike", "iv_bid", "iv_ask"]
+_SURFACE_OPTIONAL_DOUBLE = ["rate", "dividend_yield", "iv_bid", "iv_ask"]
 
 
 def fit_vol_surface(table: pa.Table, delta_pillars=None) -> pa.Table:
-    """Fit a vol surface using OTM options with a shared ATM anchor.
+    """Fit a vol surface using SVI model on OTM options.
 
     Parameters
     ----------
     table : pyarrow.Table
-        Must contain columns: iv (float64), delta (float64),
-        option_type (int32, 1=call/-1=put),
-        timestamp (timestamp), expiration (date32).
-        Optional: spot, strike (float64) for log_moneyness.
+        Must contain columns: iv (float64), option_type (int32, 1=call/-1=put),
+        timestamp (timestamp), expiration (date32),
+        spot, strike, expiry (all float64).
+        Optional: rate, dividend_yield (float64, default 0).
         Optional: iv_bid, iv_ask (float64) for bid/ask IV surface bounds.
     delta_pillars : list of float, optional
         Wing delta percentages, must be < 50 (default: [5,10,...,45]).

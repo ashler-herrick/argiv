@@ -22,3 +22,4 @@ CMakeUserPresets.json
 .ruff_cache
 .vscode
 
+test_data

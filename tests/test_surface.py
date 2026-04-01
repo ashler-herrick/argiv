@@ -465,11 +465,10 @@ class TestLogMoneyness:
             assert lm_c25["log_moneyness"] > 0, \
                 f"Call log_moneyness={lm_c25['log_moneyness']} should be positive"
 
-    def test_log_moneyness_null_without_spot_strike(self):
-        """fit_vol_surface without spot/strike should have null log_moneyness."""
+    def test_missing_spot_strike_raises(self):
+        """fit_vol_surface without spot/strike/expiry should raise ValueError."""
         table = pa.table({
             "iv": pa.array([0.20, 0.22, 0.25, 0.22, 0.20], type=pa.float64()),
-            "delta": pa.array([-0.10, -0.30, -0.45, 0.30, 0.10], type=pa.float64()),
             "option_type": pa.array([-1, -1, -1, 1, 1], type=pa.int32()),
             "timestamp": pa.array(
                 [datetime.datetime(2024, 1, 15, 10, 0, 0)] * 5,
@@ -478,11 +477,8 @@ class TestLogMoneyness:
                 [datetime.date(2024, 7, 15)] * 5,
                 type=pa.date32()),
         })
-        result = argiv.fit_vol_surface(table)
-
-        lm_values = result.column("log_moneyness").to_pylist()
-        assert all(v is None for v in lm_values), \
-            "log_moneyness should be all null without spot/strike"
+        with pytest.raises((ValueError, RuntimeError)):
+            argiv.fit_vol_surface(table)
 
 
 class TestBidAskSurface:
@@ -572,3 +568,168 @@ class TestBidAskSurface:
 
         assert "iv_bid" not in result.column_names
         assert "iv_ask" not in result.column_names
+
+
+# ---------------------------------------------------------------------------
+# SVI-specific regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestSviFitting:
+    """Tests specific to the SVI model replacing cubic splines."""
+
+    def test_short_dated_no_blowup(self):
+        """0-DTE options with narrow delta range must not produce 100+ IVs.
+
+        This is the core regression test for the cubic spline blowup bug.
+        """
+        S, T, r, q = 100.0, 0.005, 0.05, 0.0  # ~2 trading hours
+        sigma = 0.30
+        # Narrow strikes near ATM — deep OTM deltas will be small
+        strikes = np.linspace(97, 103, 15)
+        ts = datetime.datetime(2024, 1, 15, 15, 0, 0)
+        exp = datetime.date(2024, 1, 16)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        ivs = result.column("iv").to_pylist()
+        for i, val in enumerate(ivs):
+            if val is not None:
+                assert 0 < val < 2.0, (
+                    f"Row {i}: iv={val} is unreasonable for short-dated"
+                )
+
+    def test_flat_vol_recovery_svi(self):
+        """Flat vol at 0.25, wide strikes — all pillar IVs should be ~0.25."""
+        S, T, r, q = 100.0, 1.0, 0.05, 0.0
+        sigma = 0.25
+        strikes = np.linspace(70, 130, 40)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2025, 1, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, 0.0,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        ivs = result.column("iv").to_pylist()
+        non_null = [v for v in ivs if v is not None]
+        assert len(non_null) >= 10, f"Only {len(non_null)} non-null IVs"
+        for v in non_null:
+            assert abs(v - sigma) < 0.03, f"iv={v} deviates from flat {sigma}"
+
+    def test_too_few_points_produces_nan(self):
+        """Group with < 5 OTM options → all IVs should be null."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.20
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        # Only 3 OTM options — not enough for 5-param SVI
+        options = []
+        for K in [95.0, 105.0, 110.0]:
+            opt_type = -1 if K < S else 1
+            price = _bs_price(opt_type, S, K, T, r, q, sigma)
+            options.append({
+                "option_type": opt_type, "spot": S, "strike": K,
+                "expiry": T, "rate": r, "dividend_yield": q,
+                "market_price": price,
+            })
+
+        table = _make_surface_table(options, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        ivs = result.column("iv").to_pylist()
+        # With < 5 OTM points, SVI can't fit — all should be null
+        assert all(v is None for v in ivs), (
+            f"Expected all null IVs with < 5 points, got {ivs}"
+        )
+
+    def test_wing_ivs_bounded(self):
+        """All non-null output IVs must be in (0, 5.0) for any reasonable input."""
+        S, T, r, q = 100.0, 0.5, 0.05, 0.0
+        sigma = 0.25
+        skew = 0.0001
+        strikes = np.linspace(80, 120, 30)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        table = _generate_smile_options(S, T, r, q, sigma, skew,
+                                        strikes, ts, exp)
+        result = argiv.compute_fit_vol_surface(table)
+
+        ivs = result.column("iv").to_pylist()
+        non_null = [v for v in ivs if v is not None]
+        assert len(non_null) > 0
+        for v in non_null:
+            assert 0 < v < 5.0, f"iv={v} out of (0, 5.0)"
+
+
+# ---------------------------------------------------------------------------
+# AAPL regression test using real market data
+# ---------------------------------------------------------------------------
+
+
+class TestAaplRegression:
+    """Regression tests using real AAPL data from test_data/."""
+
+    @pytest.fixture(scope="class")
+    def aapl_enriched(self):
+        """Load AAPL enriched data."""
+        import polars as pl
+        import os
+        path = os.path.join(os.path.dirname(__file__), "..", "test_data",
+                            "aapl_enriched.parquet")
+        if not os.path.exists(path):
+            pytest.skip("test_data/aapl_enriched.parquet not found")
+        return pl.read_parquet(path)
+
+    def test_aapl_2018_07_26_no_blowup(self, aapl_enriched):
+        """2018-07-26 had 1-DTE exp (2018-07-27) that produced 139x IVs.
+
+        With SVI, all surface IVs must be in (0, 2.0).
+        """
+        import polars as pl
+
+        day_data = aapl_enriched.filter(
+            pl.col("timestamp").cast(pl.Date) == pl.lit("2018-07-26").cast(pl.Date)
+        )
+        if day_data.shape[0] == 0:
+            pytest.skip("2018-07-26 not in test data")
+
+        table = day_data.to_arrow()
+        result = argiv.compute_fit_vol_surface(table)
+
+        ivs = result.column("iv").to_pylist()
+        non_null = [v for v in ivs if v is not None]
+        assert len(non_null) > 0, "No IVs computed for 2018-07-26"
+        for v in non_null:
+            assert 0 < v < 2.0, (
+                f"2018-07-26 surface IV={v} is unreasonable (blowup?)"
+            )
+
+    def test_aapl_2018_07_26_atm_reasonable(self, aapl_enriched):
+        """ATM IV for the 1-DTE expiration should be in [0.1, 1.0]."""
+        import polars as pl
+
+        day_data = aapl_enriched.filter(
+            pl.col("timestamp").cast(pl.Date) == pl.lit("2018-07-26").cast(pl.Date)
+        )
+        if day_data.shape[0] == 0:
+            pytest.skip("2018-07-26 not in test data")
+
+        table = day_data.to_arrow()
+        result_pl = pl.from_arrow(argiv.compute_fit_vol_surface(table))
+
+        # Filter for shortest-dated expiration
+        short_dated = result_pl.filter(
+            pl.col("expiration") == pl.lit("2018-07-27").cast(pl.Date)
+        )
+        if short_dated.shape[0] == 0:
+            pytest.skip("2018-07-27 expiration not in surface output")
+
+        atm = short_dated.filter(pl.col("delta") == 0.5)
+        if atm.shape[0] > 0:
+            iv_atm = atm["iv"][0]
+            if iv_atm is not None:
+                assert 0.1 < iv_atm < 1.0, f"ATM IV={iv_atm} unreasonable"

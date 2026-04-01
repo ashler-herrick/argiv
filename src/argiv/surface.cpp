@@ -5,14 +5,16 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
-#include <tuple>
 #include <utility>
 #include <vector>
 
 #include <arrow/api.h>
 #include <arrow/table.h>
-#include <ql/math/interpolations/cubicinterpolation.hpp>
-#include <ql/math/interpolations/linearinterpolation.hpp>
+#include <ql/experimental/volatility/sviinterpolation.hpp>
+#include <ql/math/optimization/endcriteria.hpp>
+#include <ql/math/optimization/levenbergmarquardt.hpp>
+#include <ql/math/solvers1d/brent.hpp>
+#include <ql/pricingengines/blackcalculator.hpp>
 
 namespace argiv {
 
@@ -110,7 +112,6 @@ const int64_t* get_int64_col(const std::shared_ptr<arrow::Table>& table,
     return std::static_pointer_cast<arrow::Int64Array>(chunk)->raw_values();
 }
 
-// Build wing pillar delta values in absolute delta space (e.g., 0.05, 0.10, ..., 0.45)
 std::vector<double> build_wing_deltas(const std::vector<double>& pillars) {
     std::vector<double> deltas;
     deltas.reserve(pillars.size());
@@ -120,92 +121,91 @@ std::vector<double> build_wing_deltas(const std::vector<double>& pillars) {
     return deltas;
 }
 
-// Deduplicate (x, y) pairs sorted by x: average y values for identical x.
-void dedup_sorted(std::vector<double>& x, std::vector<double>& y,
-                  const std::vector<std::pair<double, double>>& points) {
+// Deduplicate (x, y) pairs sorted by x: average y for identical x.
+void dedup_sorted_pairs(std::vector<double>& x, std::vector<double>& y,
+                        const std::vector<std::pair<double, double>>& points) {
     x.clear();
     y.clear();
+    if (points.empty()) return;
     x.reserve(points.size());
     y.reserve(points.size());
     size_t i = 0;
     while (i < points.size()) {
-        double d = points[i].first;
-        double sum_iv = 0.0;
+        double k = points[i].first;
+        double sum = 0.0;
         size_t count = 0;
-        while (i < points.size() && points[i].first == d) {
-            sum_iv += points[i].second;
+        while (i < points.size() && points[i].first == k) {
+            sum += points[i].second;
             ++count;
             ++i;
         }
-        x.push_back(d);
-        y.push_back(sum_iv / count);
+        x.push_back(k);
+        y.push_back(sum / count);
     }
 }
 
-// Deduplicate (x, y1, y2) triples sorted by x: average y1 and y2 for identical x.
-void dedup_sorted2(std::vector<double>& x,
-                   std::vector<double>& y1,
-                   std::vector<double>& y2,
-                   const std::vector<std::tuple<double, double, double>>& points) {
-    x.clear();
-    y1.clear();
-    y2.clear();
-    x.reserve(points.size());
-    y1.reserve(points.size());
-    y2.reserve(points.size());
-    size_t i = 0;
-    while (i < points.size()) {
-        double d = std::get<0>(points[i]);
-        double sum1 = 0.0, sum2 = 0.0;
-        size_t count = 0;
-        while (i < points.size() && std::get<0>(points[i]) == d) {
-            sum1 += std::get<1>(points[i]);
-            sum2 += std::get<2>(points[i]);
-            ++count;
-            ++i;
+// Find the strike K such that BS delta(K, sigma(K)) == target_delta.
+// vol_at_strike is a callable returning IV at a given strike.
+// min_data_strike / max_data_strike bound the search to where the SVI model
+// is reliable and BS delta remains monotonic in strike.
+template <typename VolFunc>
+double strike_at_delta(double target_delta,
+                       QuantLib::Option::Type option_type,
+                       double spot, double forward, double T, double r,
+                       double min_data_strike, double max_data_strike,
+                       const VolFunc& vol_at_strike) {
+    try {
+        auto objective = [&](double K) -> double {
+            double sigma = vol_at_strike(K);
+            if (sigma <= 0.0 || std::isnan(sigma))
+                return target_delta;
+            double stdDev = sigma * std::sqrt(T);
+            double discount = std::exp(-r * T);
+            QuantLib::BlackCalculator calc(option_type, K, forward, stdDev,
+                                           discount);
+            return calc.delta(spot) - target_delta;
+        };
+
+        QuantLib::Brent solver;
+        solver.setMaxEvaluations(200);
+
+        double lo, hi;
+        if (option_type == QuantLib::Option::Put) {
+            lo = min_data_strike * 0.5;
+            hi = forward;
+        } else {
+            lo = forward;
+            hi = max_data_strike * 2.0;
         }
-        x.push_back(d);
-        y1.push_back(sum1 / count);
-        y2.push_back(sum2 / count);
+
+        // Verify the bracket contains a sign change
+        double f_lo = objective(lo);
+        double f_hi = objective(hi);
+        if (f_lo * f_hi > 0.0)
+            return NaN;  // no root in bracket
+
+        return solver.solve(objective, 1e-6, 0.5 * (lo + hi), lo, hi);
+    } catch (...) {
+        return NaN;
     }
 }
 
-// Evaluate a spline (cubic or linear depending on point count) at target deltas.
-// Only evaluates within the spline's domain [x.front(), x.back()].
-// If clamp_positive is true, values <= 0 are replaced with NaN (for IV).
-void evaluate_spline(const std::vector<double>& x,
-                     const std::vector<double>& y,
-                     const std::vector<double>& targets,
-                     std::vector<double>& out,
-                     bool clamp_positive = true) {
-    if (x.size() < 2) {
-        return;
-    }
-
-    if (x.size() >= 4) {
-        QuantLib::CubicNaturalSpline spline(x.begin(), x.end(), y.begin());
-        for (size_t i = 0; i < targets.size(); ++i) {
-            double t = targets[i];
-            if (t >= x.front() && t <= x.back()) {
-                double val = spline(t);
-                if (clamp_positive)
-                    out[i] = val > 0.0 ? val : NaN;
-                else
-                    out[i] = val;
-            }
-        }
-    } else {
-        QuantLib::LinearInterpolation interp(x.begin(), x.end(), y.begin());
-        for (size_t i = 0; i < targets.size(); ++i) {
-            double t = targets[i];
-            if (t >= x.front() && t <= x.back()) {
-                double val = interp(t);
-                if (clamp_positive)
-                    out[i] = val > 0.0 ? val : NaN;
-                else
-                    out[i] = val;
-            }
-        }
+// Try to fit SVI to (strikes, vols) data. Returns true on success.
+// On success, the SviInterpolation is ready for evaluation.
+bool try_fit_svi(const std::vector<double>& strikes,
+                 const std::vector<double>& vols,
+                 double T, double forward,
+                 QuantLib::SviInterpolation& svi) {
+    try {
+        svi.update();
+        double rms = svi.rmsError();
+        if (std::isnan(rms) || rms > 0.5)
+            return false;
+        // Quick sanity: ATM vol should be positive
+        double atm_vol = svi(forward, true);
+        return atm_vol > 0.0 && !std::isnan(atm_vol) && atm_vol < 10.0;
+    } catch (...) {
+        return false;
     }
 }
 
@@ -215,14 +215,12 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     const std::shared_ptr<arrow::Table>& input,
     const SurfaceConfig& config) {
 
-    // Validate pillars are all < 50
     for (double p : config.delta_pillars) {
         if (p >= 50.0)
             throw std::runtime_error(
                 "delta_pillars must be < 50 (ATM is computed automatically)");
     }
 
-    // Combine chunks for raw pointer access
     auto combined_result = input->CombineChunks();
     if (!combined_result.ok())
         throw std::runtime_error("Failed to combine chunks: " +
@@ -230,14 +228,12 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     auto table = combined_result.MoveValueUnsafe();
     const int64_t n = table->num_rows();
 
-    // Determine pillar layout
     auto sorted_pillars = config.delta_pillars;
     std::sort(sorted_pillars.begin(), sorted_pillars.end());
     auto wing_deltas = build_wing_deltas(sorted_pillars);
     const size_t num_wing = wing_deltas.size();
-    const size_t num_pillars = num_wing * 2 + 1;  // put wings + ATM + call wings
+    const size_t num_pillars = num_wing * 2 + 1;
 
-    // Preserve timestamp type from input schema
     auto ts_field = table->schema()->GetFieldByName("timestamp");
     if (!ts_field)
         throw std::runtime_error("Missing column: timestamp");
@@ -268,33 +264,33 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     }
 
     // --- Phase 1: Read columns ---
-    const double* iv = get_double_col(table, "iv");
-    const double* delta = get_double_col(table, "delta");
+    const double* iv_col = get_double_col(table, "iv");
     const int32_t* option_type = get_int32_col(table, "option_type");
-    const int64_t* timestamp = get_int64_col(table, "timestamp");
-    const int32_t* expiration = get_int32_col(table, "expiration");
+    const int64_t* ts_col = get_int64_col(table, "timestamp");
+    const int32_t* expiration_col = get_int32_col(table, "expiration");
+    const double* spot_col = get_double_col(table, "spot");
+    const double* strike_col = get_double_col(table, "strike");
+    const double* expiry_col = get_double_col(table, "expiry");
 
-    // Optional columns for log moneyness
-    const double* spot = try_get_double_col(table, "spot");
-    const double* strike = try_get_double_col(table, "strike");
-    const bool has_moneyness = (spot != nullptr && strike != nullptr);
+    // Optional: rate and dividend_yield (default to 0 if absent)
+    const double* rate_col = try_get_double_col(table, "rate");
+    const double* div_col = try_get_double_col(table, "dividend_yield");
 
     // --- Phase 2: Group by (timestamp, expiration) ---
     using GroupKey = std::pair<int64_t, int32_t>;
     std::map<GroupKey, std::vector<size_t>> groups;
     for (int64_t i = 0; i < n; ++i) {
-        if (std::isnan(iv[i]) || std::isnan(delta[i]))
+        if (std::isnan(iv_col[i]) || iv_col[i] <= 0.0)
             continue;
-        groups[{timestamp[i], expiration[i]}].push_back(
+        groups[{ts_col[i], expiration_col[i]}].push_back(
             static_cast<size_t>(i));
     }
 
-    // Convert to vector for indexed/parallel access
     std::vector<std::pair<GroupKey, std::vector<size_t>>> group_vec(
         groups.begin(), groups.end());
     const size_t num_groups = group_vec.size();
 
-    // --- Phase 3-4: OTM filter, ATM anchor, fit splines per group ---
+    // --- Allocate outputs ---
     const size_t total_rows = num_groups * num_pillars;
     std::vector<int64_t>  out_timestamps(total_rows);
     std::vector<int32_t>  out_expirations(total_rows);
@@ -304,274 +300,225 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     std::vector<double>   out_iv_ask(has_bid_ask ? total_rows : 0, NaN);
     std::vector<double>   out_lm(total_rows, NaN);
 
-    // Pre-fill delta values for all groups (these are always populated)
+    // Pre-fill delta values (always populated regardless of SVI success)
     for (size_t g = 0; g < num_groups; ++g) {
         const size_t base = g * num_pillars;
-        // Put side: descending magnitude (-0.45, -0.40, ..., -0.05)
         for (size_t i = 0; i < num_wing; ++i) {
             out_deltas[base + i] = -wing_deltas[num_wing - 1 - i];
         }
-        // ATM
         out_deltas[base + num_wing] = 0.50;
-        // Call side: ascending magnitude (0.05, 0.10, ..., 0.45)
         for (size_t i = 0; i < num_wing; ++i) {
             out_deltas[base + num_wing + 1 + i] = wing_deltas[i];
         }
     }
 
+    // --- Phase 3-4: SVI fitting per group ---
     #pragma omp parallel for schedule(dynamic)
     for (size_t g = 0; g < num_groups; ++g) {
         const auto& [key, indices] = group_vec[g];
         const size_t base = g * num_pillars;
 
-        // Fill timestamp/expiration for all rows in this group
         for (size_t i = 0; i < num_pillars; ++i) {
             out_timestamps[base + i] = key.first;
             out_expirations[base + i] = key.second;
         }
 
-        // Split into OTM puts and OTM calls
-        std::vector<std::pair<double, double>> put_points;   // (abs_delta, iv)
-        std::vector<std::pair<double, double>> call_points;  // (delta, iv)
-        // For log moneyness spline (parallel vectors)
-        std::vector<std::tuple<double, double, double>> put_points_lm;   // (abs_delta, iv, lm)
-        std::vector<std::tuple<double, double, double>> call_points_lm;  // (delta, iv, lm)
+        // Group-level parameters from first valid row
+        size_t first_idx = indices[0];
+        double group_spot = spot_col[first_idx];
+        double group_T = expiry_col[first_idx];
+        double group_r = rate_col ? rate_col[first_idx] : 0.0;
+        double group_q = div_col ? div_col[first_idx] : 0.0;
 
-        // Bid/ask point vectors (only used if has_bid_ask)
-        std::vector<std::pair<double, double>> put_points_bid, call_points_bid;
-        std::vector<std::pair<double, double>> put_points_ask, call_points_ask;
+        if (group_spot <= 0.0 || group_T <= 0.0)
+            continue;
 
-        double best_put_delta_dist = 1.0, best_put_iv = NaN, best_put_lm = NaN;
-        double best_call_delta_dist = 1.0, best_call_iv = NaN, best_call_lm = NaN;
-        double best_put_iv_bid = NaN, best_put_iv_ask = NaN;
-        double best_call_iv_bid = NaN, best_call_iv_ask = NaN;
+        double forward = group_spot * std::exp((group_r - group_q) * group_T);
+        if (forward <= 0.0)
+            continue;
+
+        // Collect OTM (strike, iv) pairs
+        std::vector<std::pair<double, double>> otm_points;
+        std::vector<std::pair<double, double>> otm_bid, otm_ask;
 
         for (size_t idx : indices) {
+            double K = strike_col[idx];
+            double v = iv_col[idx];
             int32_t ot = option_type[idx];
-            double d = delta[idx];
-            double v = iv[idx];
 
-            double lm = NaN;
-            if (has_moneyness && spot[idx] > 0.0 && !std::isnan(spot[idx]) &&
-                strike[idx] > 0.0 && !std::isnan(strike[idx])) {
-                lm = std::log(strike[idx] / spot[idx]);
-            }
+            if (K <= 0.0 || std::isnan(K) || v <= 0.0 || std::isnan(v))
+                continue;
 
-            if (ot == -1 && d < 0.0 && std::abs(d) <= 0.50) {
-                double abs_d = std::abs(d);
-                put_points.emplace_back(abs_d, v);
-                if (!std::isnan(lm))
-                    put_points_lm.emplace_back(abs_d, v, lm);
+            bool is_otm = (ot == -1 && K < forward) || (ot == 1 && K > forward);
+            if (!is_otm) continue;
 
-                if (has_bid_ask) {
-                    double vb = iv_bid_col[idx], va = iv_ask_col[idx];
-                    if (!std::isnan(vb)) put_points_bid.emplace_back(abs_d, vb);
-                    if (!std::isnan(va)) put_points_ask.emplace_back(abs_d, va);
-                }
+            otm_points.emplace_back(K, v);
 
-                double dist = std::abs(abs_d - 0.50);
-                if (dist < best_put_delta_dist) {
-                    best_put_delta_dist = dist;
-                    best_put_iv = v;
-                    best_put_lm = lm;
-                    if (has_bid_ask) {
-                        best_put_iv_bid = iv_bid_col[idx];
-                        best_put_iv_ask = iv_ask_col[idx];
-                    }
-                }
-            } else if (ot == 1 && d > 0.0 && d <= 0.50) {
-                call_points.emplace_back(d, v);
-                if (!std::isnan(lm))
-                    call_points_lm.emplace_back(d, v, lm);
-
-                if (has_bid_ask) {
-                    double vb = iv_bid_col[idx], va = iv_ask_col[idx];
-                    if (!std::isnan(vb)) call_points_bid.emplace_back(d, vb);
-                    if (!std::isnan(va)) call_points_ask.emplace_back(d, va);
-                }
-
-                double dist = std::abs(d - 0.50);
-                if (dist < best_call_delta_dist) {
-                    best_call_delta_dist = dist;
-                    best_call_iv = v;
-                    best_call_lm = lm;
-                    if (has_bid_ask) {
-                        best_call_iv_bid = iv_bid_col[idx];
-                        best_call_iv_ask = iv_ask_col[idx];
-                    }
-                }
+            if (has_bid_ask) {
+                double vb = iv_bid_col[idx], va = iv_ask_col[idx];
+                if (!std::isnan(vb) && vb > 0.0)
+                    otm_bid.emplace_back(K, vb);
+                if (!std::isnan(va) && va > 0.0)
+                    otm_ask.emplace_back(K, va);
             }
         }
 
-        // Compute shared ATM vol
-        double iv_atm = NaN;
-        if (!std::isnan(best_put_iv) && !std::isnan(best_call_iv)) {
-            iv_atm = (best_put_iv + best_call_iv) / 2.0;
-        } else if (!std::isnan(best_put_iv)) {
-            iv_atm = best_put_iv;
-        } else if (!std::isnan(best_call_iv)) {
-            iv_atm = best_call_iv;
-        } else {
-            continue;  // No data at all
-        }
+        if (otm_points.size() < 5) continue;
 
-        // Compute shared ATM log moneyness
-        double lm_atm = NaN;
-        if (!std::isnan(best_put_lm) && !std::isnan(best_call_lm)) {
-            lm_atm = (best_put_lm + best_call_lm) / 2.0;
-        } else if (!std::isnan(best_put_lm)) {
-            lm_atm = best_put_lm;
-        } else if (!std::isnan(best_call_lm)) {
-            lm_atm = best_call_lm;
-        }
+        // Sort and deduplicate by strike
+        std::sort(otm_points.begin(), otm_points.end());
+        std::vector<double> strikes, ivs;
+        dedup_sorted_pairs(strikes, ivs, otm_points);
 
-        // Store ATM row
-        out_ivs[base + num_wing] = iv_atm;
-        out_lm[base + num_wing] = lm_atm;
+        if (strikes.size() < 5) continue;
 
-        // --- Put-side IV spline ---
-        std::sort(put_points.begin(), put_points.end());
-        std::vector<double> px, py;
-        dedup_sorted(px, py, put_points);
-        if (!px.empty() && px.back() == 0.50) {
-            py.back() = iv_atm;
-        } else {
-            px.push_back(0.50);
-            py.push_back(iv_atm);
-        }
-
-        std::vector<double> put_iv_results(num_wing, NaN);
-        evaluate_spline(px, py, wing_deltas, put_iv_results, true);
-
-        // Put-side log moneyness spline
-        std::vector<double> put_lm_results(num_wing, NaN);
-        if (has_moneyness && !put_points_lm.empty()) {
-            // Sort by abs_delta for spline
-            std::sort(put_points_lm.begin(), put_points_lm.end(),
-                      [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
-            std::vector<double> plx, ply_iv, ply_lm;
-            dedup_sorted2(plx, ply_iv, ply_lm, put_points_lm);
-            // Anchor at 0.50
-            if (!plx.empty() && plx.back() == 0.50) {
-                ply_lm.back() = lm_atm;
-            } else if (!std::isnan(lm_atm)) {
-                plx.push_back(0.50);
-                ply_lm.push_back(lm_atm);
+        // --- Fit SVI ---
+        try {
+            // ATM IV guess from nearest-to-forward option
+            double atm_iv_guess = 0.2;
+            double best_dist = 1e18;
+            for (size_t i = 0; i < strikes.size(); ++i) {
+                double dist = std::abs(strikes[i] - forward);
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    atm_iv_guess = ivs[i];
+                }
             }
-            evaluate_spline(plx, ply_lm, wing_deltas, put_lm_results, false);
-        }
 
-        // Write put wing rows (descending magnitude: -0.45, -0.40, ..., -0.05)
-        for (size_t i = 0; i < num_wing; ++i) {
-            // wing_deltas[i] is ascending (0.05, 0.10, ...)
-            // Output index for descending: num_wing - 1 - i
-            size_t out_idx = base + num_wing - 1 - i;
-            out_ivs[out_idx] = put_iv_results[i];
-            out_lm[out_idx] = put_lm_results[i];
-        }
+            double a0 = atm_iv_guess * atm_iv_guess * group_T;
+            double b0 = 0.1;
+            double sigma0 = 0.1;
+            double rho0 = -0.4;
+            double m0 = 0.0;
 
-        // --- Call-side IV spline ---
-        std::sort(call_points.begin(), call_points.end());
-        std::vector<double> cx, cy;
-        dedup_sorted(cx, cy, call_points);
-        if (!cx.empty() && cx.back() == 0.50) {
-            cy.back() = iv_atm;
-        } else {
-            cx.push_back(0.50);
-            cy.push_back(iv_atm);
-        }
+            auto endCrit = QuantLib::ext::make_shared<QuantLib::EndCriteria>(
+                1000, 100, 1e-8, 1e-8, 1e-8);
+            auto optMethod =
+                QuantLib::ext::make_shared<QuantLib::LevenbergMarquardt>();
 
-        std::vector<double> call_iv_results(num_wing, NaN);
-        evaluate_spline(cx, cy, wing_deltas, call_iv_results, true);
+            QuantLib::SviInterpolation svi(
+                strikes.begin(), strikes.end(), ivs.begin(),
+                group_T, forward,
+                a0, b0, sigma0, rho0, m0,
+                false, false, false, false, false,
+                true, endCrit, optMethod);
 
-        // Call-side log moneyness spline
-        std::vector<double> call_lm_results(num_wing, NaN);
-        if (has_moneyness && !call_points_lm.empty()) {
-            std::sort(call_points_lm.begin(), call_points_lm.end(),
-                      [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
-            std::vector<double> clx, cly_iv, cly_lm;
-            dedup_sorted2(clx, cly_iv, cly_lm, call_points_lm);
-            if (!clx.empty() && clx.back() == 0.50) {
-                cly_lm.back() = lm_atm;
-            } else if (!std::isnan(lm_atm)) {
-                clx.push_back(0.50);
-                cly_lm.push_back(lm_atm);
-            }
-            evaluate_spline(clx, cly_lm, wing_deltas, call_lm_results, false);
-        }
+            if (!try_fit_svi(strikes, ivs, group_T, forward, svi))
+                continue;
 
-        // Write call wing rows (ascending: 0.05, 0.10, ..., 0.45)
-        for (size_t i = 0; i < num_wing; ++i) {
-            size_t out_idx = base + num_wing + 1 + i;
-            out_ivs[out_idx] = call_iv_results[i];
-            out_lm[out_idx] = call_lm_results[i];
-        }
-
-        // --- Bid/Ask splines ---
-        if (has_bid_ask) {
-            // Helper to compute ATM anchor from best put/call values
-            auto compute_atm = [](double best_put, double best_call) -> double {
-                if (!std::isnan(best_put) && !std::isnan(best_call))
-                    return (best_put + best_call) / 2.0;
-                if (!std::isnan(best_put)) return best_put;
-                if (!std::isnan(best_call)) return best_call;
-                return NaN;
+            auto vol_fn = [&](double K) -> double {
+                return svi(K, true);
             };
 
-            // Helper to fit one wing and write results
-            auto fit_wing = [&](std::vector<std::pair<double, double>>& points,
-                                double atm_val,
-                                std::vector<double>& results) {
-                std::sort(points.begin(), points.end());
-                std::vector<double> fx, fy;
-                dedup_sorted(fx, fy, points);
-                if (!std::isnan(atm_val)) {
-                    if (!fx.empty() && fx.back() == 0.50)
-                        fy.back() = atm_val;
-                    else {
-                        fx.push_back(0.50);
-                        fy.push_back(atm_val);
-                    }
-                }
-                evaluate_spline(fx, fy, wing_deltas, results, true);
-            };
+            double min_K = strikes.front();
+            double max_K = strikes.back();
 
-            double iv_atm_bid = compute_atm(best_put_iv_bid, best_call_iv_bid);
-            double iv_atm_ask = compute_atm(best_put_iv_ask, best_call_iv_ask);
+            // ATM
+            double iv_atm = svi(forward, true);
+            if (iv_atm <= 0.0 || std::isnan(iv_atm) || iv_atm > 10.0)
+                continue;
+            out_ivs[base + num_wing] = iv_atm;
+            out_lm[base + num_wing] = std::log(forward / group_spot);
 
-            // Store ATM bid/ask
-            out_iv_bid[base + num_wing] = iv_atm_bid;
-            out_iv_ask[base + num_wing] = iv_atm_ask;
-
-            // Bid splines
-            std::vector<double> put_bid_results(num_wing, NaN);
-            std::vector<double> call_bid_results(num_wing, NaN);
-            fit_wing(put_points_bid, iv_atm_bid, put_bid_results);
-            fit_wing(call_points_bid, iv_atm_bid, call_bid_results);
-
-            // Ask splines
-            std::vector<double> put_ask_results(num_wing, NaN);
-            std::vector<double> call_ask_results(num_wing, NaN);
-            fit_wing(put_points_ask, iv_atm_ask, put_ask_results);
-            fit_wing(call_points_ask, iv_atm_ask, call_ask_results);
-
-            // Write put wing (descending magnitude)
+            // Put wing pillars (descending magnitude in output)
             for (size_t i = 0; i < num_wing; ++i) {
+                double target = -wing_deltas[i];
+                double K = strike_at_delta(target, QuantLib::Option::Put,
+                                           group_spot, forward, group_T,
+                                           group_r, min_K, max_K, vol_fn);
+                if (std::isnan(K) || K <= 0.0) continue;
+                double v = svi(K, true);
+                if (v <= 0.0 || std::isnan(v) || v > 10.0) continue;
                 size_t out_idx = base + num_wing - 1 - i;
-                out_iv_bid[out_idx] = put_bid_results[i];
-                out_iv_ask[out_idx] = put_ask_results[i];
+                out_ivs[out_idx] = v;
+                out_lm[out_idx] = std::log(K / group_spot);
             }
-            // Write call wing (ascending)
+
+            // Call wing pillars (ascending in output)
             for (size_t i = 0; i < num_wing; ++i) {
+                double target = wing_deltas[i];
+                double K = strike_at_delta(target, QuantLib::Option::Call,
+                                           group_spot, forward, group_T,
+                                           group_r, min_K, max_K, vol_fn);
+                if (std::isnan(K) || K <= 0.0) continue;
+                double v = svi(K, true);
+                if (v <= 0.0 || std::isnan(v) || v > 10.0) continue;
                 size_t out_idx = base + num_wing + 1 + i;
-                out_iv_bid[out_idx] = call_bid_results[i];
-                out_iv_ask[out_idx] = call_ask_results[i];
+                out_ivs[out_idx] = v;
+                out_lm[out_idx] = std::log(K / group_spot);
             }
+
+            // --- Bid/Ask SVI fits ---
+            if (has_bid_ask) {
+                // Helper: fit SVI for bid or ask, write results at same
+                // put/call strike layout already computed above.
+                auto fit_bid_ask_svi = [&](
+                    std::vector<std::pair<double, double>>& raw_points,
+                    std::vector<double>& out_vec) {
+
+                    if (raw_points.size() < 5) return;
+                    std::sort(raw_points.begin(), raw_points.end());
+                    std::vector<double> ba_strikes, ba_ivs;
+                    dedup_sorted_pairs(ba_strikes, ba_ivs, raw_points);
+                    if (ba_strikes.size() < 5) return;
+
+                    double ba_a0 = atm_iv_guess * atm_iv_guess * group_T;
+                    QuantLib::SviInterpolation ba_svi(
+                        ba_strikes.begin(), ba_strikes.end(), ba_ivs.begin(),
+                        group_T, forward,
+                        ba_a0, b0, sigma0, rho0, m0,
+                        false, false, false, false, false,
+                        true, endCrit, optMethod);
+                    if (!try_fit_svi(ba_strikes, ba_ivs, group_T, forward,
+                                     ba_svi))
+                        return;
+
+                    // ATM
+                    double ba_atm = ba_svi(forward, true);
+                    if (ba_atm > 0.0 && !std::isnan(ba_atm) && ba_atm < 10.0)
+                        out_vec[base + num_wing] = ba_atm;
+
+                    for (size_t i = 0; i < num_wing; ++i) {
+                        double target_put = -wing_deltas[i];
+                        double Kp = strike_at_delta(
+                            target_put, QuantLib::Option::Put,
+                            group_spot, forward, group_T, group_r,
+                            min_K, max_K,
+                            [&](double K) { return ba_svi(K, true); });
+                        if (!std::isnan(Kp) && Kp > 0.0) {
+                            double v = ba_svi(Kp, true);
+                            if (v > 0.0 && !std::isnan(v) && v < 10.0) {
+                                size_t out_idx = base + num_wing - 1 - i;
+                                out_vec[out_idx] = v;
+                            }
+                        }
+
+                        double target_call = wing_deltas[i];
+                        double Kc = strike_at_delta(
+                            target_call, QuantLib::Option::Call,
+                            group_spot, forward, group_T, group_r,
+                            min_K, max_K,
+                            [&](double K) { return ba_svi(K, true); });
+                        if (!std::isnan(Kc) && Kc > 0.0) {
+                            double v = ba_svi(Kc, true);
+                            if (v > 0.0 && !std::isnan(v) && v < 10.0) {
+                                size_t out_idx = base + num_wing + 1 + i;
+                                out_vec[out_idx] = v;
+                            }
+                        }
+                    }
+                };
+
+                fit_bid_ask_svi(otm_bid, out_iv_bid);
+                fit_bid_ask_svi(otm_ask, out_iv_ask);
+            }
+
+        } catch (...) {
+            continue;  // SVI fit failed entirely; leave all NaN
         }
     }
 
     // --- Phase 5: Build output Arrow table ---
-    // Timestamp column (preserve input type)
     auto ts_builder_result = arrow::MakeBuilder(ts_type);
     if (!ts_builder_result.ok())
         throw std::runtime_error("Failed to create timestamp builder");
@@ -586,7 +533,6 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     if (!ts_builder->Finish(&ts_array).ok())
         throw std::runtime_error("Timestamp finish failed");
 
-    // Expiration column (date32)
     arrow::Date32Builder exp_builder;
     for (size_t i = 0; i < total_rows; ++i) {
         auto status = exp_builder.Append(out_expirations[i]);
@@ -597,7 +543,6 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     if (!exp_builder.Finish(&exp_array).ok())
         throw std::runtime_error("Expiration finish failed");
 
-    // Delta column
     arrow::DoubleBuilder delta_builder;
     for (size_t i = 0; i < total_rows; ++i) {
         auto status = delta_builder.Append(out_deltas[i]);
@@ -608,17 +553,14 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     if (!delta_builder.Finish(&delta_array).ok())
         throw std::runtime_error("Delta finish failed");
 
-    // IV column (NaN -> null)
     arrow::DoubleBuilder iv_builder;
     for (size_t i = 0; i < total_rows; ++i) {
         double val = out_ivs[i];
         if (std::isnan(val)) {
-            auto status = iv_builder.AppendNull();
-            if (!status.ok())
+            if (!iv_builder.AppendNull().ok())
                 throw std::runtime_error("IV AppendNull failed");
         } else {
-            auto status = iv_builder.Append(val);
-            if (!status.ok())
+            if (!iv_builder.Append(val).ok())
                 throw std::runtime_error("IV Append failed");
         }
     }
@@ -626,17 +568,14 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     if (!iv_builder.Finish(&iv_array).ok())
         throw std::runtime_error("IV finish failed");
 
-    // Log moneyness column (NaN -> null)
     arrow::DoubleBuilder lm_builder;
     for (size_t i = 0; i < total_rows; ++i) {
         double val = out_lm[i];
         if (std::isnan(val)) {
-            auto status = lm_builder.AppendNull();
-            if (!status.ok())
+            if (!lm_builder.AppendNull().ok())
                 throw std::runtime_error("Log moneyness AppendNull failed");
         } else {
-            auto status = lm_builder.Append(val);
-            if (!status.ok())
+            if (!lm_builder.Append(val).ok())
                 throw std::runtime_error("Log moneyness Append failed");
         }
     }
@@ -644,7 +583,6 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     if (!lm_builder.Finish(&lm_array).ok())
         throw std::runtime_error("Log moneyness finish failed");
 
-    // Bid/Ask IV columns (NaN -> null), built conditionally
     std::shared_ptr<arrow::Array> iv_bid_array, iv_ask_array;
     if (has_bid_ask) {
         auto build_nullable_double = [&](const std::vector<double>& data,
@@ -672,7 +610,6 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
         iv_ask_array = build_nullable_double(out_iv_ask, "iv_ask");
     }
 
-    // Assemble schema and arrays
     arrow::FieldVector fields = {
         arrow::field("timestamp", ts_type),
         arrow::field("expiration", arrow::date32()),
