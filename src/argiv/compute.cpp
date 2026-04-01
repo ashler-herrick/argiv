@@ -11,34 +11,73 @@ namespace argiv {
 namespace {
 
 // Helper to get a double column's raw data (requires single-chunk table).
+// Validates that the column is actually float64 and contains no nulls.
 const double* get_double_col(const std::shared_ptr<arrow::Table>& table,
                              const std::string& name) {
     auto col = table->GetColumnByName(name);
     if (!col) {
         throw std::runtime_error("Missing column: " + name);
     }
-    auto arr = std::static_pointer_cast<arrow::DoubleArray>(col->chunk(0));
-    return arr->raw_values();
+    auto chunk = col->chunk(0);
+    if (chunk->type_id() != arrow::Type::DOUBLE) {
+        throw std::runtime_error(
+            "Column '" + name + "' has type " + chunk->type()->ToString() +
+            ", expected float64. Cast the column before passing to argiv.");
+    }
+    if (chunk->null_count() > 0) {
+        throw std::runtime_error(
+            "Column '" + name + "' contains " +
+            std::to_string(chunk->null_count()) + " null values of " +
+            std::to_string(chunk->length()) + " total. "
+            "Fill or drop nulls before passing to argiv.");
+    }
+    return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
 }
 
 // Helper to get int32 column's raw data (requires single-chunk table).
+// Validates that the column is actually int32 and contains no nulls.
 const int32_t* get_int_col(const std::shared_ptr<arrow::Table>& table,
                            const std::string& name) {
     auto col = table->GetColumnByName(name);
     if (!col) {
         throw std::runtime_error("Missing column: " + name);
     }
-    auto arr = std::static_pointer_cast<arrow::Int32Array>(col->chunk(0));
-    return arr->raw_values();
+    auto chunk = col->chunk(0);
+    if (chunk->type_id() != arrow::Type::INT32) {
+        throw std::runtime_error(
+            "Column '" + name + "' has type " + chunk->type()->ToString() +
+            ", expected int32. Cast the column before passing to argiv.");
+    }
+    if (chunk->null_count() > 0) {
+        throw std::runtime_error(
+            "Column '" + name + "' contains " +
+            std::to_string(chunk->null_count()) + " null values of " +
+            std::to_string(chunk->length()) + " total. "
+            "Fill or drop nulls before passing to argiv.");
+    }
+    return std::static_pointer_cast<arrow::Int32Array>(chunk)->raw_values();
 }
 
 // Optional column accessor (returns nullptr if column not present).
+// Validates type and nulls if column exists.
 const double* try_get_double_col(const std::shared_ptr<arrow::Table>& table,
                                  const std::string& name) {
     auto col = table->GetColumnByName(name);
     if (!col) return nullptr;
-    auto arr = std::static_pointer_cast<arrow::DoubleArray>(col->chunk(0));
-    return arr->raw_values();
+    auto chunk = col->chunk(0);
+    if (chunk->type_id() != arrow::Type::DOUBLE) {
+        throw std::runtime_error(
+            "Column '" + name + "' has type " + chunk->type()->ToString() +
+            ", expected float64. Cast the column before passing to argiv.");
+    }
+    if (chunk->null_count() > 0) {
+        throw std::runtime_error(
+            "Column '" + name + "' contains " +
+            std::to_string(chunk->null_count()) + " null values of " +
+            std::to_string(chunk->length()) + " total. "
+            "Fill or drop nulls before passing to argiv.");
+    }
+    return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
 }
 
 }  // namespace
@@ -54,6 +93,20 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
     }
     auto table = combined_result.MoveValueUnsafe();
     const int64_t n = table->num_rows();
+
+    // Sanity check: CombineChunks must produce single-chunk columns.
+    if (n > 0) {
+        for (int c = 0; c < table->num_columns(); ++c) {
+            auto col = table->column(c);
+            if (col->num_chunks() != 1) {
+                throw std::runtime_error(
+                    "Internal error: column '" +
+                    table->schema()->field(c)->name() + "' has " +
+                    std::to_string(col->num_chunks()) +
+                    " chunks after CombineChunks (expected 1)");
+            }
+        }
+    }
 
     // Detect optional bid/ask columns
     const double* bid_price_col = try_get_double_col(table, "bid_price");

@@ -25,8 +25,20 @@ const double* get_double_col(const std::shared_ptr<arrow::Table>& table,
     auto col = table->GetColumnByName(name);
     if (!col)
         throw std::runtime_error("Missing column: " + name);
-    auto arr = std::static_pointer_cast<arrow::DoubleArray>(col->chunk(0));
-    return arr->raw_values();
+    auto chunk = col->chunk(0);
+    if (chunk->type_id() != arrow::Type::DOUBLE) {
+        throw std::runtime_error(
+            "Column '" + name + "' has type " + chunk->type()->ToString() +
+            ", expected float64. Cast the column before passing to argiv.");
+    }
+    if (chunk->null_count() > 0) {
+        throw std::runtime_error(
+            "Column '" + name + "' contains " +
+            std::to_string(chunk->null_count()) + " null values of " +
+            std::to_string(chunk->length()) + " total. "
+            "Fill or drop nulls before passing to argiv.");
+    }
+    return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
 }
 
 const double* try_get_double_col(const std::shared_ptr<arrow::Table>& table,
@@ -34,26 +46,68 @@ const double* try_get_double_col(const std::shared_ptr<arrow::Table>& table,
     auto col = table->GetColumnByName(name);
     if (!col)
         return nullptr;
-    auto arr = std::static_pointer_cast<arrow::DoubleArray>(col->chunk(0));
-    return arr->raw_values();
+    auto chunk = col->chunk(0);
+    if (chunk->type_id() != arrow::Type::DOUBLE) {
+        throw std::runtime_error(
+            "Column '" + name + "' has type " + chunk->type()->ToString() +
+            ", expected float64. Cast the column before passing to argiv.");
+    }
+    if (chunk->null_count() > 0) {
+        throw std::runtime_error(
+            "Column '" + name + "' contains " +
+            std::to_string(chunk->null_count()) + " null values of " +
+            std::to_string(chunk->length()) + " total. "
+            "Fill or drop nulls before passing to argiv.");
+    }
+    return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
 }
 
+// Accepts int32 or date32 (both use int32 physical storage).
 const int32_t* get_int32_col(const std::shared_ptr<arrow::Table>& table,
                              const std::string& name) {
     auto col = table->GetColumnByName(name);
     if (!col)
         throw std::runtime_error("Missing column: " + name);
-    auto arr = std::static_pointer_cast<arrow::Int32Array>(col->chunk(0));
-    return arr->raw_values();
+    auto chunk = col->chunk(0);
+    bool ok = chunk->type_id() == arrow::Type::INT32 ||
+              chunk->type_id() == arrow::Type::DATE32;
+    if (!ok) {
+        throw std::runtime_error(
+            "Column '" + name + "' has type " + chunk->type()->ToString() +
+            ", expected int32 or date32. Cast the column before passing to argiv.");
+    }
+    if (chunk->null_count() > 0) {
+        throw std::runtime_error(
+            "Column '" + name + "' contains " +
+            std::to_string(chunk->null_count()) + " null values of " +
+            std::to_string(chunk->length()) + " total. "
+            "Fill or drop nulls before passing to argiv.");
+    }
+    return std::static_pointer_cast<arrow::Int32Array>(chunk)->raw_values();
 }
 
+// Accepts int64 or timestamp (both use int64 physical storage).
 const int64_t* get_int64_col(const std::shared_ptr<arrow::Table>& table,
                              const std::string& name) {
     auto col = table->GetColumnByName(name);
     if (!col)
         throw std::runtime_error("Missing column: " + name);
-    auto arr = std::static_pointer_cast<arrow::Int64Array>(col->chunk(0));
-    return arr->raw_values();
+    auto chunk = col->chunk(0);
+    bool ok = chunk->type_id() == arrow::Type::INT64 ||
+              chunk->type_id() == arrow::Type::TIMESTAMP;
+    if (!ok) {
+        throw std::runtime_error(
+            "Column '" + name + "' has type " + chunk->type()->ToString() +
+            ", expected int64 or timestamp. Cast the column before passing to argiv.");
+    }
+    if (chunk->null_count() > 0) {
+        throw std::runtime_error(
+            "Column '" + name + "' contains " +
+            std::to_string(chunk->null_count()) + " null values of " +
+            std::to_string(chunk->length()) + " total. "
+            "Fill or drop nulls before passing to argiv.");
+    }
+    return std::static_pointer_cast<arrow::Int64Array>(chunk)->raw_values();
 }
 
 // Build wing pillar delta values in absolute delta space (e.g., 0.05, 0.10, ..., 0.45)

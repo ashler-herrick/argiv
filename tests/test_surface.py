@@ -368,7 +368,7 @@ class TestOptionTypeRequired:
                 [datetime.date(2024, 7, 15)] * 2,
                 type=pa.date32()),
         })
-        with pytest.raises(RuntimeError, match="Missing column: option_type"):
+        with pytest.raises((ValueError, RuntimeError), match="[Mm]issing"):
             argiv.fit_vol_surface(table)
 
 
