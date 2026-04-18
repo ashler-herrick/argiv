@@ -94,7 +94,7 @@ class TestSyntheticSmile:
         result = argiv.compute_fit_vol_surface(table)
 
         assert result.num_rows == DEFAULT_PILLARS_PER_GROUP
-        assert result.column_names == ["timestamp", "expiration", "delta", "iv", "log_moneyness"]
+        assert result.column_names == ["timestamp", "expiration", "expiry", "delta", "iv", "log_moneyness"]
 
         # Check 25-delta put and call
         iv_p25 = _get_iv_at_delta(result, -0.25)
@@ -305,7 +305,69 @@ class TestEdgeCases:
         })
         result = argiv.compute_fit_vol_surface(table)
         assert result.num_rows == 0
-        assert result.column_names == ["timestamp", "expiration", "delta", "iv", "log_moneyness"]
+        assert result.column_names == ["timestamp", "expiration", "expiry", "delta", "iv", "log_moneyness"]
+
+
+class TestDuplicates:
+    """Test behavior when the input table contains duplicate rows."""
+
+    def test_exact_duplicates_match_unique(self):
+        """Exact row duplicates should produce the same surface as unique data.
+
+        surface.cpp averages IVs at equal strikes during dedup, so exact
+        duplicates average to themselves (avg = v) and the fit is unchanged.
+        """
+        S, T, r, q = 100.0, 0.5, 0.05, 0.01
+        base_sigma = 0.20
+        skew_coeff = 0.00005
+        strikes = np.linspace(80, 120, 30)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        unique_table = _generate_smile_options(
+            S, T, r, q, base_sigma, skew_coeff, strikes, ts, exp
+        )
+        dup_table = pa.concat_tables([unique_table, unique_table])
+
+        unique_result = argiv.compute_fit_vol_surface(unique_table)
+        dup_result = argiv.compute_fit_vol_surface(dup_table)
+
+        assert dup_result.num_rows == unique_result.num_rows
+        assert dup_result.num_rows == DEFAULT_PILLARS_PER_GROUP
+
+        u_ivs = unique_result.column("iv").to_pylist()
+        d_ivs = dup_result.column("iv").to_pylist()
+        for u, d in zip(u_ivs, d_ivs):
+            if u is None:
+                assert d is None
+            else:
+                assert d is not None
+                assert abs(u - d) < 1e-9, f"iv differs: unique={u}, dup={d}"
+
+    def test_triplicated_data_match_unique(self):
+        """Three copies should still produce the same surface."""
+        S, T, r, q, sigma = 100.0, 0.5, 0.05, 0.0, 0.25
+        strikes = np.linspace(85, 115, 25)
+        ts = datetime.datetime(2024, 1, 15, 10, 0, 0)
+        exp = datetime.date(2024, 7, 15)
+
+        unique_table = _generate_smile_options(
+            S, T, r, q, sigma, 0.0, strikes, ts, exp
+        )
+        dup_table = pa.concat_tables([unique_table] * 3)
+
+        unique_result = argiv.compute_fit_vol_surface(unique_table)
+        dup_result = argiv.compute_fit_vol_surface(dup_table)
+
+        assert dup_result.num_rows == unique_result.num_rows
+
+        u_ivs = unique_result.column("iv").to_pylist()
+        d_ivs = dup_result.column("iv").to_pylist()
+        for u, d in zip(u_ivs, d_ivs):
+            if u is None:
+                assert d is None
+            else:
+                assert abs(u - d) < 1e-9
 
 
 class TestCustomPillars:
@@ -385,7 +447,7 @@ class TestOutputSchema:
                                         strikes, ts, exp)
         result = argiv.compute_fit_vol_surface(table)
 
-        assert result.column_names == ["timestamp", "expiration", "delta", "iv", "log_moneyness"]
+        assert result.column_names == ["timestamp", "expiration", "expiry", "delta", "iv", "log_moneyness"]
 
     def test_delta_ordering(self):
         """Within a group, deltas should be ordered: puts descending, ATM, calls ascending."""

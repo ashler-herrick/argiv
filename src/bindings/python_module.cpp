@@ -3,6 +3,7 @@
 
 #include "argiv/arrow_interop.hpp"
 #include "argiv/compute.hpp"
+#include "argiv/greeks_from_iv.hpp"
 #include "argiv/surface.hpp"
 
 namespace py = pybind11;
@@ -36,6 +37,32 @@ PYBIND11_MODULE(_core, m) {
         pyarrow.Table
             Input columns plus: iv, delta, gamma, vega, theta, rho.
             If bid_price and ask_price are present: also iv_bid, iv_ask.
+        )");
+
+    m.def(
+        "compute_greeks_from_iv",
+        [](py::object input_table) -> py::object {
+            auto table = argiv::import_table(input_table);
+            std::shared_ptr<arrow::Table> result;
+            {
+                py::gil_scoped_release release;
+                result = argiv::compute_greeks_from_iv_table(table);
+            }
+            return argiv::export_table(result);
+        },
+        py::arg("table"),
+        R"(Compute Greeks from pre-computed implied volatility.
+
+        Parameters
+        ----------
+        table : pyarrow.Table
+            Must contain columns: option_type (int32, 1=call/-1=put),
+            spot, strike, expiry, rate, dividend_yield, iv (all float64).
+
+        Returns
+        -------
+        pyarrow.Table
+            Input columns plus: delta, gamma, vega, theta, rho.
         )");
 
     m.def(

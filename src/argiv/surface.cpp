@@ -1,3 +1,4 @@
+#include "argiv/arrow_helpers.hpp"
 #include "argiv/surface.hpp"
 
 #include <algorithm>
@@ -21,96 +22,6 @@ namespace argiv {
 namespace {
 
 constexpr double NaN = std::numeric_limits<double>::quiet_NaN();
-
-const double* get_double_col(const std::shared_ptr<arrow::Table>& table,
-                             const std::string& name) {
-    auto col = table->GetColumnByName(name);
-    if (!col)
-        throw std::runtime_error("Missing column: " + name);
-    auto chunk = col->chunk(0);
-    if (chunk->type_id() != arrow::Type::DOUBLE) {
-        throw std::runtime_error(
-            "Column '" + name + "' has type " + chunk->type()->ToString() +
-            ", expected float64. Cast the column before passing to argiv.");
-    }
-    if (chunk->null_count() > 0) {
-        throw std::runtime_error(
-            "Column '" + name + "' contains " +
-            std::to_string(chunk->null_count()) + " null values of " +
-            std::to_string(chunk->length()) + " total. "
-            "Fill or drop nulls before passing to argiv.");
-    }
-    return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
-}
-
-const double* try_get_double_col(const std::shared_ptr<arrow::Table>& table,
-                                 const std::string& name) {
-    auto col = table->GetColumnByName(name);
-    if (!col)
-        return nullptr;
-    auto chunk = col->chunk(0);
-    if (chunk->type_id() != arrow::Type::DOUBLE) {
-        throw std::runtime_error(
-            "Column '" + name + "' has type " + chunk->type()->ToString() +
-            ", expected float64. Cast the column before passing to argiv.");
-    }
-    if (chunk->null_count() > 0) {
-        throw std::runtime_error(
-            "Column '" + name + "' contains " +
-            std::to_string(chunk->null_count()) + " null values of " +
-            std::to_string(chunk->length()) + " total. "
-            "Fill or drop nulls before passing to argiv.");
-    }
-    return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
-}
-
-// Accepts int32 or date32 (both use int32 physical storage).
-const int32_t* get_int32_col(const std::shared_ptr<arrow::Table>& table,
-                             const std::string& name) {
-    auto col = table->GetColumnByName(name);
-    if (!col)
-        throw std::runtime_error("Missing column: " + name);
-    auto chunk = col->chunk(0);
-    bool ok = chunk->type_id() == arrow::Type::INT32 ||
-              chunk->type_id() == arrow::Type::DATE32;
-    if (!ok) {
-        throw std::runtime_error(
-            "Column '" + name + "' has type " + chunk->type()->ToString() +
-            ", expected int32 or date32. Cast the column before passing to argiv.");
-    }
-    if (chunk->null_count() > 0) {
-        throw std::runtime_error(
-            "Column '" + name + "' contains " +
-            std::to_string(chunk->null_count()) + " null values of " +
-            std::to_string(chunk->length()) + " total. "
-            "Fill or drop nulls before passing to argiv.");
-    }
-    return std::static_pointer_cast<arrow::Int32Array>(chunk)->raw_values();
-}
-
-// Accepts int64 or timestamp (both use int64 physical storage).
-const int64_t* get_int64_col(const std::shared_ptr<arrow::Table>& table,
-                             const std::string& name) {
-    auto col = table->GetColumnByName(name);
-    if (!col)
-        throw std::runtime_error("Missing column: " + name);
-    auto chunk = col->chunk(0);
-    bool ok = chunk->type_id() == arrow::Type::INT64 ||
-              chunk->type_id() == arrow::Type::TIMESTAMP;
-    if (!ok) {
-        throw std::runtime_error(
-            "Column '" + name + "' has type " + chunk->type()->ToString() +
-            ", expected int64 or timestamp. Cast the column before passing to argiv.");
-    }
-    if (chunk->null_count() > 0) {
-        throw std::runtime_error(
-            "Column '" + name + "' contains " +
-            std::to_string(chunk->null_count()) + " null values of " +
-            std::to_string(chunk->length()) + " total. "
-            "Fill or drop nulls before passing to argiv.");
-    }
-    return std::static_pointer_cast<arrow::Int64Array>(chunk)->raw_values();
-}
 
 std::vector<double> build_wing_deltas(const std::vector<double>& pillars) {
     std::vector<double> deltas;
@@ -249,6 +160,7 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
         arrow::FieldVector fields;
         fields.push_back(arrow::field("timestamp", ts_type));
         fields.push_back(arrow::field("expiration", arrow::date32()));
+        fields.push_back(arrow::field("expiry", arrow::float64()));
         fields.push_back(arrow::field("delta", arrow::float64()));
         fields.push_back(arrow::field("iv", arrow::float64()));
         if (has_bid_ask) {
@@ -299,6 +211,7 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     std::vector<double>   out_iv_bid(has_bid_ask ? total_rows : 0, NaN);
     std::vector<double>   out_iv_ask(has_bid_ask ? total_rows : 0, NaN);
     std::vector<double>   out_lm(total_rows, NaN);
+    std::vector<double>   out_expiries(total_rows, NaN);
 
     // Pre-fill delta values (always populated regardless of SVI success)
     for (size_t g = 0; g < num_groups; ++g) {
@@ -327,6 +240,9 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
         size_t first_idx = indices[0];
         double group_spot = spot_col[first_idx];
         double group_T = expiry_col[first_idx];
+
+        for (size_t i = 0; i < num_pillars; ++i)
+            out_expiries[base + i] = group_T;
         double group_r = rate_col ? rate_col[first_idx] : 0.0;
         double group_q = div_col ? div_col[first_idx] : 0.0;
 
@@ -616,14 +532,24 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
         iv_ask_array = build_nullable_double(out_iv_ask, "iv_ask");
     }
 
+    arrow::DoubleBuilder expiry_builder;
+    for (size_t i = 0; i < total_rows; ++i) {
+        if (!expiry_builder.Append(out_expiries[i]).ok())
+            throw std::runtime_error("Expiry append failed");
+    }
+    std::shared_ptr<arrow::Array> expiry_array;
+    if (!expiry_builder.Finish(&expiry_array).ok())
+        throw std::runtime_error("Expiry finish failed");
+
     arrow::FieldVector fields = {
         arrow::field("timestamp", ts_type),
         arrow::field("expiration", arrow::date32()),
+        arrow::field("expiry", arrow::float64()),
         arrow::field("delta", arrow::float64()),
         arrow::field("iv", arrow::float64()),
     };
     std::vector<std::shared_ptr<arrow::Array>> arrays = {
-        ts_array, exp_array, delta_array, iv_array,
+        ts_array, exp_array, expiry_array, delta_array, iv_array,
     };
 
     if (has_bid_ask) {
