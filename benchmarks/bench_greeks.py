@@ -235,10 +235,14 @@ def print_comparison_table(size, results, argiv_result):
     print("|---------------------------|------------|------------|------------|------------|------------|----------|")
 
     for r in results:
-        if r.library == "argiv":
+        if r is argiv_result:
             speedup_str = "       -"
         else:
-            speedup_str = f"{r.median / argiv_result.median:>6.0f}x "
+            ratio = r.median / argiv_result.median
+            if ratio >= 10:
+                speedup_str = f"{ratio:>6.0f}x "
+            else:
+                speedup_str = f"{ratio:>6.2f}x "
         print(
             f"| {r.library:<25s} "
             f"| {r.mean:>10.4f} "
@@ -291,10 +295,32 @@ def main():
         results[n] = []
 
         # argiv (always run) — receives pa.Table since Arrow import is its interface
-        print("running argiv...")
-        times = benchmark_fn(argiv.compute_greeks, table, trials=trials)
-        argiv_result = BenchmarkResult(library="argiv", size=n, times=times)
+        print("running argiv (numerical)...")
+        times = benchmark_fn(
+            argiv.compute_greeks, table, trials=trials
+        )
+        argiv_result = BenchmarkResult(
+            library="argiv (numerical)", size=n, times=times
+        )
         results[n].append(argiv_result)
+
+        print("running argiv (schadner)...")
+        times = benchmark_fn(
+            lambda t: argiv.compute_greeks(t, iv_solver="schadner"),
+            table, trials=trials,
+        )
+        results[n].append(BenchmarkResult(
+            library="argiv (schadner)", size=n, times=times
+        ))
+
+        print("running argiv (lookup)...")
+        times = benchmark_fn(
+            lambda t: argiv.compute_greeks(t, iv_solver="lookup"),
+            table, trials=trials,
+        )
+        results[n].append(BenchmarkResult(
+            library="argiv (lookup)", size=n, times=times
+        ))
 
         # Python/scipy baseline (skip at 100k+)
         if n <= 1_000:

@@ -78,7 +78,9 @@ _GREEKS_TYPES: dict[str, pa.DataType] = {
 _GREEKS_OPTIONAL_DOUBLE = ["bid_price", "ask_price"]
 
 
-def compute_greeks(table: pa.Table) -> pa.Table:
+def compute_greeks(
+    table: pa.Table, iv_solver: str = "numerical"
+) -> pa.Table:
     """Compute implied volatility and Greeks for a table of options.
 
     Parameters
@@ -87,6 +89,15 @@ def compute_greeks(table: pa.Table) -> pa.Table:
         Must contain columns: option_type (int32, 1=call/-1=put),
         spot, strike, expiry, rate, dividend_yield, market_price (all float64).
         Optional: bid_price, ask_price (float64) for bid/ask IV bounds.
+    iv_solver : {"numerical", "schadner", "lookup"}, default "numerical"
+        IV solver to use. "numerical" runs Brent root-finding on the
+        Black-Scholes price; "schadner" uses the closed-form inverse
+        Gaussian quantile from Schadner (arXiv:2604.24480); "lookup"
+        bicubically interpolates a 2D Catmull-Rom table indexed by
+        |log(K/F)| and logit(OTM-normalized price). Lookup hits
+        ~4-decimal accuracy on σ for inputs in the tabulated domain
+        (|k| ≤ 1.5, σ-range covering typical markets) and returns NaN
+        outside; the table is built once at module load.
 
     Returns
     -------
@@ -104,7 +115,7 @@ def compute_greeks(table: pa.Table) -> pa.Table:
     table = _ensure_column_types(table, type_map)
     _check_nulls(table, list(type_map.keys()))
 
-    return _compute_greeks_impl(table)
+    return _compute_greeks_impl(table, iv_solver)
 
 
 # -- compute_greeks_from_iv ----------------------------------------------------
@@ -201,7 +212,9 @@ def fit_vol_surface(table: pa.Table, delta_pillars=None) -> pa.Table:
 _COMBO_REQUIRED = _GREEKS_REQUIRED + ["timestamp", "expiration"]
 
 
-def compute_fit_vol_surface(table: pa.Table, delta_pillars=None) -> pa.Table:
+def compute_fit_vol_surface(
+    table: pa.Table, delta_pillars=None, iv_solver: str = "numerical"
+) -> pa.Table:
     """Compute Greeks and fit a vol surface in one step.
 
     Parameters
@@ -230,7 +243,7 @@ def compute_fit_vol_surface(table: pa.Table, delta_pillars=None) -> pa.Table:
     table = _ensure_column_types(table, type_map)
     _check_nulls(table, list(type_map.keys()))
 
-    return _compute_fit_vol_surface_impl(table, delta_pillars)
+    return _compute_fit_vol_surface_impl(table, delta_pillars, iv_solver)
 
 
 # -- greeks_at_pillars ---------------------------------------------------------

@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(QuantLib CONFIG REQUIRED)
 find_package(Arrow CONFIG REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
+find_package(boost_math CONFIG REQUIRED)
 find_package(OpenMP)
 
 pybind11_add_module(_core
@@ -18,7 +19,7 @@ pybind11_add_module(_core
 )
 
 target_include_directories(_core PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(_core PRIVATE QuantLib::QuantLib Arrow::arrow_static)
+target_link_libraries(_core PRIVATE QuantLib::QuantLib Arrow::arrow_static Boost::math)
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)

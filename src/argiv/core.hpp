@@ -4,6 +4,12 @@
 
 namespace argiv {
 
+enum class IVSolver {
+    Numerical,  // QuantLib BlackCalculator + Brent
+    Schadner,   // Closed-form via inverse Gaussian quantile (arXiv:2604.24480)
+    Lookup,     // Precomputed 2D table on (|k|, OTM-normalized price), bilinear interp
+};
+
 struct OptionResult {
     double iv;
     double delta;
@@ -19,6 +25,7 @@ struct OptionResult {
 // market_price (observed option price)
 OptionResult compute_single(int option_type, double spot, double strike,
                             double T, double r, double q,
-                            double market_price);
+                            double market_price,
+                            IVSolver solver = IVSolver::Numerical);
 
 }  // namespace argiv

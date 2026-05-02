@@ -10,7 +10,7 @@
 namespace argiv {
 
 std::shared_ptr<arrow::Table> compute_greeks_table(
-    const std::shared_ptr<arrow::Table>& input) {
+    const std::shared_ptr<arrow::Table>& input, IVSolver solver) {
 
     auto table = combine_and_validate(input);
     const int64_t n = table->num_rows();
@@ -64,7 +64,7 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
     for (int64_t i = 0; i < n; ++i) {
         auto res = compute_single(option_type[i], spot[i], strike[i],
                                   expiry[i], rate[i], dividend_yield[i],
-                                  market_price[i]);
+                                  market_price[i], solver);
         iv[i] = res.iv;
         delta[i] = res.delta;
         gamma[i] = res.gamma;
@@ -75,10 +75,10 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
         if (has_bid_ask) {
             iv_bid[i] = compute_single(option_type[i], spot[i], strike[i],
                                        expiry[i], rate[i], dividend_yield[i],
-                                       bid_price_col[i]).iv;
+                                       bid_price_col[i], solver).iv;
             iv_ask[i] = compute_single(option_type[i], spot[i], strike[i],
                                        expiry[i], rate[i], dividend_yield[i],
-                                       ask_price_col[i]).iv;
+                                       ask_price_col[i], solver).iv;
         }
     }
 
