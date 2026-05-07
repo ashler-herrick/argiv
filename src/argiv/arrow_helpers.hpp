@@ -10,6 +10,9 @@
 namespace argiv {
 
 // Combine all chunks in a table and validate single-chunk invariant.
+// Empty tables (e.g. from `Table.from_batches([], schema=...)`) can have 0
+// chunks per column even after CombineChunks; normalize those to exactly one
+// zero-length chunk so downstream raw_values() is always safe.
 inline std::shared_ptr<arrow::Table> combine_and_validate(
     const std::shared_ptr<arrow::Table>& input) {
     auto combined_result = input->CombineChunks();
@@ -18,20 +21,45 @@ inline std::shared_ptr<arrow::Table> combine_and_validate(
                                  combined_result.status().ToString());
     }
     auto table = combined_result.MoveValueUnsafe();
-    if (table->num_rows() > 0) {
+    if (table->num_rows() == 0) {
+        std::vector<std::shared_ptr<arrow::ChunkedArray>> cols;
+        cols.reserve(table->num_columns());
         for (int c = 0; c < table->num_columns(); ++c) {
-            auto col = table->column(c);
-            if (col->num_chunks() != 1) {
+            auto type = table->schema()->field(c)->type();
+            auto empty = arrow::MakeEmptyArray(type);
+            if (!empty.ok()) {
                 throw std::runtime_error(
-                    "Internal error: column '" +
-                    table->schema()->field(c)->name() + "' has " +
-                    std::to_string(col->num_chunks()) +
-                    " chunks after CombineChunks (expected 1)");
+                    "Failed to build empty array for column '" +
+                    table->schema()->field(c)->name() +
+                    "': " + empty.status().ToString());
             }
+            cols.push_back(std::make_shared<arrow::ChunkedArray>(*empty));
+        }
+        return arrow::Table::Make(table->schema(), cols, 0);
+    }
+    for (int c = 0; c < table->num_columns(); ++c) {
+        auto col = table->column(c);
+        if (col->num_chunks() != 1) {
+            throw std::runtime_error(
+                "Internal error: column '" +
+                table->schema()->field(c)->name() + "' has " +
+                std::to_string(col->num_chunks()) +
+                " chunks after CombineChunks (expected 1)");
         }
     }
     return table;
 }
+
+// raw_values() on a zero-length array can dereference a null values buffer
+// (Arrow allows length-0 arrays with no allocated values buffer). Callers
+// must respect the table's num_rows() and never read these sentinels — they
+// only exist so that pointer-validity checks (e.g. `ptr != nullptr` to detect
+// optional columns) keep working on empty inputs.
+namespace detail {
+inline const double*  empty_double_sentinel()  { static const double v = 0.0; return &v; }
+inline const int32_t* empty_int32_sentinel()   { static const int32_t v = 0; return &v; }
+inline const int64_t* empty_int64_sentinel()   { static const int64_t v = 0; return &v; }
+}  // namespace detail
 
 // Get a required float64 column's raw data (requires single-chunk table).
 inline const double* get_double_col(
@@ -53,6 +81,7 @@ inline const double* get_double_col(
             std::to_string(chunk->length()) + " total. "
             "Fill or drop nulls before passing to argiv.");
     }
+    if (chunk->length() == 0) return detail::empty_double_sentinel();
     return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
 }
 
@@ -75,6 +104,7 @@ inline const double* try_get_double_col(
             std::to_string(chunk->length()) + " total. "
             "Fill or drop nulls before passing to argiv.");
     }
+    if (chunk->length() == 0) return detail::empty_double_sentinel();
     return std::static_pointer_cast<arrow::DoubleArray>(chunk)->raw_values();
 }
 
@@ -98,6 +128,7 @@ inline const int32_t* get_int_col(
             std::to_string(chunk->length()) + " total. "
             "Fill or drop nulls before passing to argiv.");
     }
+    if (chunk->length() == 0) return detail::empty_int32_sentinel();
     return std::static_pointer_cast<arrow::Int32Array>(chunk)->raw_values();
 }
 
@@ -123,6 +154,7 @@ inline const int32_t* get_int32_col(
             std::to_string(chunk->length()) + " total. "
             "Fill or drop nulls before passing to argiv.");
     }
+    if (chunk->length() == 0) return detail::empty_int32_sentinel();
     return std::static_pointer_cast<arrow::Int32Array>(chunk)->raw_values();
 }
 
@@ -148,6 +180,7 @@ inline const int64_t* get_int64_col(
             std::to_string(chunk->length()) + " total. "
             "Fill or drop nulls before passing to argiv.");
     }
+    if (chunk->length() == 0) return detail::empty_int64_sentinel();
     return std::static_pointer_cast<arrow::Int64Array>(chunk)->raw_values();
 }
 

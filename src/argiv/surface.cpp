@@ -151,26 +151,6 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
     const double* iv_ask_col = try_get_double_col(table, "iv_ask");
     const bool has_bid_ask = (iv_bid_col != nullptr && iv_ask_col != nullptr);
 
-    // Handle empty input
-    if (n == 0) {
-        arrow::FieldVector fields;
-        fields.push_back(arrow::field("timestamp", ts_type));
-        fields.push_back(arrow::field("expiration", arrow::date32()));
-        fields.push_back(arrow::field("expiry", arrow::float64()));
-        fields.push_back(arrow::field("delta", arrow::float64()));
-        fields.push_back(arrow::field("iv", arrow::float64()));
-        if (has_bid_ask) {
-            fields.push_back(arrow::field("iv_bid", arrow::float64()));
-            fields.push_back(arrow::field("iv_ask", arrow::float64()));
-        }
-        fields.push_back(arrow::field("log_moneyness", arrow::float64()));
-        auto schema = arrow::schema(fields);
-        return arrow::Table::Make(schema,
-            std::vector<std::shared_ptr<arrow::Array>>(
-                fields.size(), std::make_shared<arrow::NullArray>(0)),
-            0);
-    }
-
     // --- Phase 1: Read columns ---
     const double* iv_col = get_double_col(table, "iv");
     const int32_t* option_type = get_int32_col(table, "option_type");

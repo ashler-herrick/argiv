@@ -21,19 +21,6 @@ std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
     auto table = combine_and_validate(input);
     const int64_t n = table->num_rows();
 
-    // Handle empty table
-    if (n == 0) {
-        auto result = table;
-        for (const auto& name : {"delta", "gamma", "vega", "theta", "rho"}) {
-            auto empty_arr = std::make_shared<arrow::DoubleArray>(0, nullptr);
-            auto empty_chunked = std::make_shared<arrow::ChunkedArray>(empty_arr);
-            result = *result->AddColumn(result->num_columns(),
-                                        arrow::field(name, arrow::float64()),
-                                        empty_chunked);
-        }
-        return result;
-    }
-
     // Extract input columns
     const int32_t* option_type = get_int_col(table, "option_type");
     const double* spot = get_double_col(table, "spot");

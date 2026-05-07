@@ -20,28 +20,6 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
     const double* ask_price_col = try_get_double_col(table, "ask_price");
     const bool has_bid_ask = (bid_price_col != nullptr && ask_price_col != nullptr);
 
-    // Handle empty table
-    if (n == 0) {
-        auto result = table;
-        for (const auto& name : {"iv", "delta", "gamma", "vega", "theta", "rho"}) {
-            auto empty_arr = std::make_shared<arrow::DoubleArray>(0, nullptr);
-            auto empty_chunked = std::make_shared<arrow::ChunkedArray>(empty_arr);
-            result = *result->AddColumn(result->num_columns(),
-                                        arrow::field(name, arrow::float64()),
-                                        empty_chunked);
-        }
-        if (has_bid_ask) {
-            for (const auto& name : {"iv_bid", "iv_ask"}) {
-                auto empty_arr = std::make_shared<arrow::DoubleArray>(0, nullptr);
-                auto empty_chunked = std::make_shared<arrow::ChunkedArray>(empty_arr);
-                result = *result->AddColumn(result->num_columns(),
-                                            arrow::field(name, arrow::float64()),
-                                            empty_chunked);
-            }
-        }
-        return result;
-    }
-
     // Extract input columns
     const int32_t* option_type = get_int_col(table, "option_type");
     const double* spot = get_double_col(table, "spot");

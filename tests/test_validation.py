@@ -486,3 +486,88 @@ class TestMemorySafety:
         assert result.num_rows == 0
         for col in GREEK_COLS:
             assert col in result.column_names
+
+    def test_empty_table_zero_chunks(self):
+        """Table.from_batches([], schema=...) yields 0-chunk columns.
+
+        This is the path real producers (record-batch streams) hit when no
+        batches arrive — and the path that segfaulted in production before
+        ``combine_and_validate`` learned to normalize 0-chunk columns.
+        """
+        import pyarrow as pa
+
+        schema = pa.schema([
+            ("option_type", pa.int32()),
+            ("spot", pa.float64()),
+            ("strike", pa.float64()),
+            ("expiry", pa.float64()),
+            ("rate", pa.float64()),
+            ("dividend_yield", pa.float64()),
+            ("market_price", pa.float64()),
+        ])
+        empty = pa.Table.from_batches([], schema=schema)
+        # Sanity: this is the layout we want to exercise.
+        assert empty.column("spot").num_chunks == 0
+        result = argiv.compute_greeks(empty)
+        assert result.num_rows == 0
+        for col in GREEK_COLS:
+            assert col in result.column_names
+
+    def test_empty_table_with_bid_ask(self):
+        """Empty table with optional bid/ask columns must also not crash."""
+        import pyarrow as pa
+
+        schema = pa.schema([
+            ("option_type", pa.int32()),
+            ("spot", pa.float64()),
+            ("strike", pa.float64()),
+            ("expiry", pa.float64()),
+            ("rate", pa.float64()),
+            ("dividend_yield", pa.float64()),
+            ("market_price", pa.float64()),
+            ("bid_price", pa.float64()),
+            ("ask_price", pa.float64()),
+        ])
+        empty = pa.Table.from_batches([], schema=schema)
+        result = argiv.compute_greeks(empty)
+        assert result.num_rows == 0
+        for col in GREEK_COLS + ["iv_bid", "iv_ask"]:
+            assert col in result.column_names
+
+    def test_empty_table_iv_path(self):
+        """Empty table on the IV path (no market_price) must not crash."""
+        import pyarrow as pa
+
+        schema = pa.schema([
+            ("option_type", pa.int32()),
+            ("spot", pa.float64()),
+            ("strike", pa.float64()),
+            ("expiry", pa.float64()),
+            ("rate", pa.float64()),
+            ("dividend_yield", pa.float64()),
+            ("iv", pa.float64()),
+        ])
+        empty = pa.Table.from_batches([], schema=schema)
+        result = argiv.compute_greeks(empty)
+        assert result.num_rows == 0
+        for col in ["delta", "gamma", "vega", "theta", "rho"]:
+            assert col in result.column_names
+
+    def test_empty_table_fit_vol_surface(self):
+        """fit_vol_surface on an empty (0-chunk) table must not crash."""
+        import pyarrow as pa
+
+        schema = pa.schema([
+            ("iv", pa.float64()),
+            ("option_type", pa.int32()),
+            ("timestamp", pa.timestamp("ns")),
+            ("expiration", pa.date32()),
+            ("spot", pa.float64()),
+            ("strike", pa.float64()),
+            ("expiry", pa.float64()),
+        ])
+        empty = pa.Table.from_batches([], schema=schema)
+        result = argiv.fit_vol_surface(empty)
+        assert result.num_rows == 0
+        for col in ["timestamp", "expiration", "delta", "iv", "log_moneyness"]:
+            assert col in result.column_names
