@@ -30,54 +30,47 @@ PYBIND11_MODULE(_core, m) {
         [](py::object input_table, std::string iv_solver) -> py::object {
             auto solver = parse_solver(iv_solver);
             auto table = argiv::import_table(input_table);
+            const bool has_iv = table->GetColumnByName("iv") != nullptr;
+            const bool has_price =
+                table->GetColumnByName("market_price") != nullptr;
+            if (!has_iv && !has_price) {
+                throw std::invalid_argument(
+                    "compute_greeks requires either 'iv' or 'market_price' "
+                    "column in the input table.");
+            }
             std::shared_ptr<arrow::Table> result;
             {
                 py::gil_scoped_release release;
-                result = argiv::compute_greeks_table(table, solver);
+                if (has_iv) {
+                    result = argiv::compute_greeks_from_iv_table(table);
+                } else {
+                    result = argiv::compute_greeks_table(table, solver);
+                }
             }
             return argiv::export_table(result);
         },
         py::arg("table"), py::arg("iv_solver") = std::string("numerical"),
         R"(Compute implied volatility and Greeks for a table of options.
 
-        Parameters
-        ----------
-        table : pyarrow.Table
-            Must contain columns: option_type (int32, 1=call/-1=put),
-            spot, strike, expiry, rate, dividend_yield, market_price (all float64).
-            Optional: bid_price, ask_price (float64) for bid/ask IV bounds.
-
-        Returns
-        -------
-        pyarrow.Table
-            Input columns plus: iv, delta, gamma, vega, theta, rho.
-            If bid_price and ask_price are present: also iv_bid, iv_ask.
-        )");
-
-    m.def(
-        "compute_greeks_from_iv",
-        [](py::object input_table) -> py::object {
-            auto table = argiv::import_table(input_table);
-            std::shared_ptr<arrow::Table> result;
-            {
-                py::gil_scoped_release release;
-                result = argiv::compute_greeks_from_iv_table(table);
-            }
-            return argiv::export_table(result);
-        },
-        py::arg("table"),
-        R"(Compute Greeks from pre-computed implied volatility.
+        If the input table has an 'iv' column, Greeks are computed directly
+        from it (no solve) and 'iv_solver' is ignored. Otherwise, IV is solved
+        from 'market_price' using the chosen solver.
 
         Parameters
         ----------
         table : pyarrow.Table
-            Must contain columns: option_type (int32, 1=call/-1=put),
-            spot, strike, expiry, rate, dividend_yield, iv (all float64).
+            Required columns: option_type (int32, 1=call/-1=put),
+            spot, strike, expiry, rate, dividend_yield (all float64).
+            Plus EITHER 'market_price' (to solve for IV) OR 'iv' (to skip the
+            solve). If both are present, 'iv' wins.
+            Optional (price path only): bid_price, ask_price (float64) for
+            bid/ask IV bounds.
 
         Returns
         -------
         pyarrow.Table
-            Input columns plus: delta, gamma, vega, theta, rho.
+            Input columns plus delta, gamma, vega, theta, rho. On the price
+            path, also iv (and iv_bid, iv_ask if bid/ask provided).
         )");
 
     m.def(
@@ -118,48 +111,5 @@ PYBIND11_MODULE(_core, m) {
             One row per (timestamp, expiration, delta) with columns:
             timestamp, expiration, delta (signed), iv, log_moneyness.
             If iv_bid and iv_ask are present: also iv_bid, iv_ask.
-        )");
-
-    m.def(
-        "compute_fit_vol_surface",
-        [](py::object input_table, py::object delta_pillars_obj,
-           std::string iv_solver) -> py::object {
-            auto solver = parse_solver(iv_solver);
-            auto table = argiv::import_table(input_table);
-            argiv::SurfaceConfig config;
-            if (!delta_pillars_obj.is_none()) {
-                config.delta_pillars.clear();
-                for (auto item : delta_pillars_obj)
-                    config.delta_pillars.push_back(item.cast<double>());
-            }
-            std::shared_ptr<arrow::Table> result;
-            {
-                py::gil_scoped_release release;
-                auto enriched = argiv::compute_greeks_table(table, solver);
-                result = argiv::fit_vol_surface_table(enriched, config);
-            }
-            return argiv::export_table(result);
-        },
-        py::arg("table"), py::arg("delta_pillars") = py::none(),
-        py::arg("iv_solver") = std::string("numerical"),
-        R"(Compute Greeks and fit a vol surface in one step.
-
-        Parameters
-        ----------
-        table : pyarrow.Table
-            Must contain columns: option_type (int32, 1=call/-1=put),
-            spot, strike, expiry, rate, dividend_yield, market_price (all float64),
-            timestamp (timestamp), expiration (date32).
-            Optional: bid_price, ask_price (float64) for bid/ask IV bounds.
-        delta_pillars : list of float, optional
-            Wing delta percentages, must be < 50 (default: [5,10,...,45]).
-            ATM (delta=0.50) is always computed automatically.
-
-        Returns
-        -------
-        pyarrow.Table
-            One row per (timestamp, expiration, delta) with columns:
-            timestamp, expiration, delta (signed), iv, log_moneyness.
-            If bid_price and ask_price are present: also iv_bid, iv_ask.
         )");
 }

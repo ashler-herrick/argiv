@@ -127,9 +127,13 @@ def main():
     warmup = 1
 
     # ------------------------------------------------------------------
-    # Phase 1: compute_fit_vol_surface (greeks + SVI in one shot)
+    # Phase 1: compute_greeks + fit_vol_surface (greeks + SVI in one shot)
     # ------------------------------------------------------------------
-    print("## compute_fit_vol_surface (greeks + SVI fit)\n")
+    print("## compute_greeks + fit_vol_surface (greeks + SVI fit)\n")
+
+    def _greeks_then_surface(t):
+        return argiv.fit_vol_surface(argiv.compute_greeks(t))
+
     results_combo = []
     for n_rg in SLICES:
         table, actual_rg = read_n_row_groups(DATA_PATH, n_rg)
@@ -138,7 +142,7 @@ def main():
         label = f"{actual_rg} rg ({nrows:,} rows)"
 
         print(f"  {label} — {n_unique} groups ...", end=" ", flush=True)
-        times = benchmark_fn(argiv.compute_fit_vol_surface, table, warmup=warmup, trials=trials)
+        times = benchmark_fn(_greeks_then_surface, table, warmup=warmup, trials=trials)
         print(f"median {statistics.median(times):.3f}s")
 
         results_combo.append(BenchmarkResult(label=label, rows_in=nrows, groups=n_unique, times=times))

@@ -91,7 +91,7 @@ class TestSyntheticSmile:
 
         table = _generate_smile_options(S, T, r, q, base_sigma, skew_coeff,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         assert result.num_rows == DEFAULT_PILLARS_PER_GROUP
         assert result.column_names == ["timestamp", "expiration", "expiry", "delta", "iv", "log_moneyness"]
@@ -114,7 +114,7 @@ class TestSyntheticSmile:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         ivs = result.column("iv").to_pylist()
         for i, val in enumerate(ivs):
@@ -135,7 +135,7 @@ class TestATMVol:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         deltas = result.column("delta").to_pylist()
         assert 0.50 in deltas
@@ -150,7 +150,7 @@ class TestATMVol:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         iv_atm = _get_iv_at_delta(result, 0.50)
         assert iv_atm is not None, "ATM iv should not be null"
@@ -167,7 +167,7 @@ class TestATMVol:
 
         table = _generate_smile_options(S, T, r, q, base_sigma, skew_coeff,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         iv_atm = _get_iv_at_delta(result, 0.50)
         assert iv_atm is not None
@@ -183,7 +183,7 @@ class TestATMVol:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         deltas = result.column("delta").to_pylist()
         assert -0.50 not in deltas
@@ -203,7 +203,7 @@ class TestMultipleGroups:
         t2 = _generate_smile_options(S, T2, r, q, sigma, 0.0, strikes, ts, exp2)
         combined = pa.concat_tables([t1, t2])
 
-        result = argiv.compute_fit_vol_surface(combined)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(combined))
         assert result.num_rows == 2 * DEFAULT_PILLARS_PER_GROUP
 
         exps = result.column("expiration").to_pylist()
@@ -221,7 +221,7 @@ class TestMultipleGroups:
         t2 = _generate_smile_options(S, T, r, q, sigma, 0.0, strikes, ts2, exp)
         combined = pa.concat_tables([t1, t2])
 
-        result = argiv.compute_fit_vol_surface(combined)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(combined))
         assert result.num_rows == 2 * DEFAULT_PILLARS_PER_GROUP
 
     def test_three_groups(self):
@@ -238,7 +238,7 @@ class TestMultipleGroups:
                                                   strikes, ts, exp))
         combined = pa.concat_tables(tables)
 
-        result = argiv.compute_fit_vol_surface(combined)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(combined))
         assert result.num_rows == 3 * DEFAULT_PILLARS_PER_GROUP
 
 
@@ -257,7 +257,7 @@ class TestEdgeCases:
               "rate": r, "dividend_yield": q, "market_price": price}],
             ts, exp,
         )
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
         assert result.num_rows == DEFAULT_PILLARS_PER_GROUP
 
         ivs = result.column("iv").to_pylist()
@@ -283,7 +283,7 @@ class TestEdgeCases:
             })
 
         table = _make_surface_table(options, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
         assert result.num_rows == DEFAULT_PILLARS_PER_GROUP
 
         iv_atm = _get_iv_at_delta(result, 0.50)
@@ -303,7 +303,7 @@ class TestEdgeCases:
             "timestamp": pa.array([], type=pa.timestamp("us")),
             "expiration": pa.array([], type=pa.date32()),
         })
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
         assert result.num_rows == 0
         assert result.column_names == ["timestamp", "expiration", "expiry", "delta", "iv", "log_moneyness"]
 
@@ -329,8 +329,8 @@ class TestDuplicates:
         )
         dup_table = pa.concat_tables([unique_table, unique_table])
 
-        unique_result = argiv.compute_fit_vol_surface(unique_table)
-        dup_result = argiv.compute_fit_vol_surface(dup_table)
+        unique_result = argiv.fit_vol_surface(argiv.compute_greeks(unique_table))
+        dup_result = argiv.fit_vol_surface(argiv.compute_greeks(dup_table))
 
         assert dup_result.num_rows == unique_result.num_rows
         assert dup_result.num_rows == DEFAULT_PILLARS_PER_GROUP
@@ -356,8 +356,8 @@ class TestDuplicates:
         )
         dup_table = pa.concat_tables([unique_table] * 3)
 
-        unique_result = argiv.compute_fit_vol_surface(unique_table)
-        dup_result = argiv.compute_fit_vol_surface(dup_table)
+        unique_result = argiv.fit_vol_surface(argiv.compute_greeks(unique_table))
+        dup_result = argiv.fit_vol_surface(argiv.compute_greeks(dup_table))
 
         assert dup_result.num_rows == unique_result.num_rows
 
@@ -381,7 +381,7 @@ class TestCustomPillars:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table, delta_pillars=[10, 25])
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table), delta_pillars=[10, 25])
 
         # 2 put + ATM + 2 call = 5 rows
         assert result.num_rows == 5
@@ -396,7 +396,7 @@ class TestCustomPillars:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table, delta_pillars=[25])
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table), delta_pillars=[25])
 
         assert result.num_rows == 3
         deltas = sorted(result.column("delta").to_pylist())
@@ -412,7 +412,7 @@ class TestCustomPillars:
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
         with pytest.raises(RuntimeError, match="must be < 50"):
-            argiv.compute_fit_vol_surface(table, delta_pillars=[25, 50])
+            argiv.fit_vol_surface(argiv.compute_greeks(table), delta_pillars=[25, 50])
 
 
 class TestOptionTypeRequired:
@@ -445,7 +445,7 @@ class TestOutputSchema:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         assert result.column_names == ["timestamp", "expiration", "expiry", "delta", "iv", "log_moneyness"]
 
@@ -458,7 +458,7 @@ class TestOutputSchema:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         deltas = result.column("delta").to_pylist()
         expected = [-0.45, -0.40, -0.35, -0.30, -0.25, -0.20, -0.15, -0.10, -0.05,
@@ -488,7 +488,7 @@ class TestOutputSchema:
                 "timestamp": pa.array([ts] * 10, type=pa.timestamp(unit)),
                 "expiration": pa.array([exp] * 10, type=pa.date32()),
             })
-            result = argiv.compute_fit_vol_surface(table)
+            result = argiv.fit_vol_surface(argiv.compute_greeks(table))
             assert result.schema.field("timestamp").type == pa.timestamp(unit), \
                 f"Timestamp type mismatch for unit={unit}"
 
@@ -497,7 +497,7 @@ class TestLogMoneyness:
     """Test log moneyness computation."""
 
     def test_log_moneyness_populated(self):
-        """compute_fit_vol_surface should populate log_moneyness."""
+        """fit_vol_surface should populate log_moneyness."""
         S, T, r, q = 100.0, 0.5, 0.05, 0.0
         sigma = 0.25
         strikes = np.linspace(85, 115, 25)
@@ -506,7 +506,7 @@ class TestLogMoneyness:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         # ATM log_moneyness should be near 0
         atm_row = _get_row_at_delta(result, 0.50)
@@ -591,7 +591,7 @@ class TestBidAskSurface:
         exp = datetime.date(2024, 7, 15)
 
         table = self._generate_bid_ask_options(S, T, r, q, sigma, strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         assert "iv_bid" in result.column_names
         assert "iv_ask" in result.column_names
@@ -604,7 +604,7 @@ class TestBidAskSurface:
         exp = datetime.date(2024, 7, 15)
 
         table = self._generate_bid_ask_options(S, T, r, q, sigma, strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         ivs = result.column("iv").to_pylist()
         iv_bids = result.column("iv_bid").to_pylist()
@@ -626,7 +626,7 @@ class TestBidAskSurface:
         exp = datetime.date(2024, 7, 15)
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0, strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         assert "iv_bid" not in result.column_names
         assert "iv_ask" not in result.column_names
@@ -654,7 +654,7 @@ class TestSviFitting:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         ivs = result.column("iv").to_pylist()
         for i, val in enumerate(ivs):
@@ -673,7 +673,7 @@ class TestSviFitting:
 
         table = _generate_smile_options(S, T, r, q, sigma, 0.0,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         ivs = result.column("iv").to_pylist()
         non_null = [v for v in ivs if v is not None]
@@ -699,7 +699,7 @@ class TestSviFitting:
             })
 
         table = _make_surface_table(options, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         ivs = result.column("iv").to_pylist()
         # With < 5 OTM points, SVI can't fit — all should be null
@@ -718,7 +718,7 @@ class TestSviFitting:
 
         table = _generate_smile_options(S, T, r, q, sigma, skew,
                                         strikes, ts, exp)
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         ivs = result.column("iv").to_pylist()
         non_null = [v for v in ivs if v is not None]
@@ -760,7 +760,7 @@ class TestAaplRegression:
             pytest.skip("2018-07-26 not in test data")
 
         table = day_data.to_arrow()
-        result = argiv.compute_fit_vol_surface(table)
+        result = argiv.fit_vol_surface(argiv.compute_greeks(table))
 
         ivs = result.column("iv").to_pylist()
         non_null = [v for v in ivs if v is not None]
@@ -781,7 +781,7 @@ class TestAaplRegression:
             pytest.skip("2018-07-26 not in test data")
 
         table = day_data.to_arrow()
-        result_pl = pl.from_arrow(argiv.compute_fit_vol_surface(table))
+        result_pl = pl.from_arrow(argiv.fit_vol_surface(argiv.compute_greeks(table)))
 
         # Filter for shortest-dated expiration
         short_dated = result_pl.filter(

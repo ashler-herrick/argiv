@@ -190,7 +190,9 @@ class TestMissingColumns:
         table = _make_correct_table(10)
         idx = table.schema.get_field_index(col_name)
         table = table.remove_column(idx)
-        with pytest.raises(ValueError, match="Missing"):
+        # Dropping market_price triggers a different error (the price/iv path
+        # selector), so accept either message.
+        with pytest.raises(ValueError, match="Missing|market_price"):
             argiv.compute_greeks(table)
 
 

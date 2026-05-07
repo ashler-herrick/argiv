@@ -132,11 +132,7 @@ std::shared_ptr<arrow::Table> fit_vol_surface_table(
                 "delta_pillars must be < 50 (ATM is computed automatically)");
     }
 
-    auto combined_result = input->CombineChunks();
-    if (!combined_result.ok())
-        throw std::runtime_error("Failed to combine chunks: " +
-                                 combined_result.status().ToString());
-    auto table = combined_result.MoveValueUnsafe();
+    auto table = combine_and_validate(input);
     const int64_t n = table->num_rows();
 
     auto sorted_pillars = config.delta_pillars;
