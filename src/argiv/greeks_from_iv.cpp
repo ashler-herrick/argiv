@@ -43,8 +43,19 @@ std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
         double S = spot[i];
         double K = strike[i];
         double sigma = iv[i];
+        double r = rate[i];
+        double q = dividend_yield[i];
 
-        if (T <= 0.0 || S <= 0.0 || K <= 0.0 || sigma <= 0.0) {
+        double discount = std::exp(-r * T);
+        double forward = S * std::exp((r - q) * T);
+        double stdDev = sigma * std::sqrt(T);
+
+        // forward/discount/stdDev cover non-finite r and q (neither is
+        // sign-constrained, so they are only checked through the quantities
+        // QuantLib consumes).
+        if (!pos_finite(T) || !pos_finite(S) || !pos_finite(K) ||
+            !pos_finite(sigma) || !pos_finite(forward) ||
+            !pos_finite(discount) || !pos_finite(stdDev)) {
             delta[i] = NaN;
             gamma[i] = NaN;
             vega[i] = NaN;
@@ -61,14 +72,8 @@ std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
             continue;
         }
 
-        double r = rate[i];
-        double q = dividend_yield[i];
         auto ql_type = (option_type[i] == 1) ? QuantLib::Option::Call
                                               : QuantLib::Option::Put;
-
-        double discount = std::exp(-r * T);
-        double forward = S * std::exp((r - q) * T);
-        double stdDev = sigma * std::sqrt(T);
 
         QuantLib::BlackCalculator calc(ql_type, K, forward, stdDev, discount);
 

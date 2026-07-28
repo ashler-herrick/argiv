@@ -262,16 +262,20 @@ OptionResult compute_single(int option_type, double spot, double strike,
     OptionResult result;
     constexpr double nan = std::numeric_limits<double>::quiet_NaN();
 
-    if (T <= 0.0 || spot <= 0.0 || strike <= 0.0 || market_price <= 0.0) {
+    double discount = std::exp(-r * T);
+    double forward = spot * std::exp((r - q) * T);
+
+    // forward/discount cover non-finite r and q (neither is sign-constrained,
+    // so they are only checked through the quantities QuantLib consumes).
+    if (!pos_finite(T) || !pos_finite(spot) || !pos_finite(strike) ||
+        !pos_finite(market_price) || !pos_finite(forward) ||
+        !pos_finite(discount)) {
         result = {nan, nan, nan, nan, nan, nan};
         return result;
     }
 
     auto ql_type = (option_type == 1) ? QuantLib::Option::Call
                                       : QuantLib::Option::Put;
-
-    double discount = std::exp(-r * T);
-    double forward = spot * std::exp((r - q) * T);
 
     double iv = nan;
     if (solver == IVSolver::Schadner) {

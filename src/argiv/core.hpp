@@ -10,6 +10,13 @@ enum class IVSolver {
     Lookup,     // Precomputed 2D table on (|k|, OTM-normalized price), bilinear interp
 };
 
+// False unless x is finite and strictly positive. Written as a positive test
+// on purpose: every comparison with NaN is false, so the natural `x <= 0.0`
+// reject form lets NaN through, and QuantLib then throws inside an OpenMP
+// loop where the exception cannot propagate -- std::terminate kills the whole
+// process. A bad input must produce a NaN row, never an abort.
+inline bool pos_finite(double x) { return x > 0.0 && std::isfinite(x); }
+
 struct OptionResult {
     double iv;
     double delta;

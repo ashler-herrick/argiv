@@ -1,4 +1,8 @@
+import functools
+import json
 import math
+import subprocess
+import sys
 
 import numpy as np
 import pyarrow as pa
@@ -267,3 +271,74 @@ class TestHigherOrderGreeks:
         res = argiv.compute_greeks(empty, higher_order=True)
         assert res.num_rows == 0
         assert set(HIGHER_ORDER_COLS).issubset(res.column_names)
+
+
+# -- non-finite inputs must never abort the process ---------------------------
+#
+# A QuantLib::Error thrown inside the OpenMP loop cannot propagate: it hits
+# std::terminate and kills the interpreter, which pytest cannot catch. So every
+# case below runs in a subprocess and asserts the exit code.
+
+_BAD_ROW_SCRIPT = """
+import json, sys
+import pyarrow as pa
+import argiv
+
+col, bad, path, higher_order = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4] == "1"
+cols = {
+    "option_type": pa.array([1, -1], type=pa.int32()),
+    "spot": [100.0, 100.0],
+    "strike": [95.0, 105.0],
+    "expiry": [0.5, 1.0],
+    "rate": [0.04, 0.04],
+    "dividend_yield": [0.02, 0.02],
+}
+cols["iv" if path == "from_iv" else "market_price"] = (
+    [0.25, 0.30] if path == "from_iv" else [9.0, 8.0]
+)
+if col != "none":
+    cols[col] = list(cols[col])
+    cols[col][0] = bad
+
+res = argiv.compute_greeks(pa.table(cols), higher_order=higher_order)
+out = {c: res.column(c).to_pylist() for c in res.column_names if c != "option_type"}
+print(json.dumps(out))
+"""
+
+_GREEK_COLS = ["delta", "gamma", "vega", "theta", "rho"]
+
+
+@functools.lru_cache(maxsize=None)
+def _run_bad_row(col, bad, path, higher_order):
+    proc = subprocess.run(
+        [sys.executable, "-c", _BAD_ROW_SCRIPT, col, repr(bad), path,
+         "1" if higher_order else "0"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"compute_greeks aborted (rc={proc.returncode}) on {path} "
+        f"{col}={bad}: {proc.stderr.strip()[-300:]}"
+    )
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("higher_order", [False, True])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    "path,col",
+    [("from_iv", c) for c in
+     ["spot", "strike", "expiry", "rate", "dividend_yield", "iv"]]
+    + [("solve", c) for c in
+       ["spot", "strike", "expiry", "rate", "dividend_yield", "market_price"]],
+)
+def test_non_finite_input_yields_nan_row_not_abort(path, col, bad, higher_order):
+    """A bad value poisons only its own row; the process survives."""
+    out = _run_bad_row(col, bad, path, higher_order)
+    clean = _run_bad_row("none", 0.0, path, higher_order)
+
+    greeks = _GREEK_COLS + (HIGHER_ORDER_COLS if higher_order else [])
+    greeks += [c for c in ("iv",) if path == "solve"]
+    for c in greeks:
+        assert math.isnan(out[c][0]), f"{c} row 0 should be NaN, got {out[c][0]}"
+        # The OpenMP loop must not let the bad row corrupt its neighbour.
+        assert out[c][1] == clean[c][1], f"{c} row 1 changed: {out[c][1]}"
