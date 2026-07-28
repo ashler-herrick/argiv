@@ -1,7 +1,7 @@
 import pyarrow as pa
 
 def compute_greeks(
-    table: pa.Table, iv_solver: str = "numerical"
+    table: pa.Table, iv_solver: str = "numerical", higher_order: bool = False
 ) -> pa.Table: ...
 def fit_vol_surface(
     table: pa.Table,

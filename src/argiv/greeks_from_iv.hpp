@@ -12,8 +12,10 @@ namespace argiv {
 // spot, strike, expiry, rate, dividend_yield, iv (all float64).
 //
 // Returns the input table with additional columns:
-// delta, gamma, vega, theta, rho (all float64).
+// delta, gamma, vega, theta, rho (all float64), plus
+// vanna, volga, charm, speed, zomma, color when higher_order is true.
 std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
-    const std::shared_ptr<arrow::Table>& input);
+    const std::shared_ptr<arrow::Table>& input,
+    bool higher_order = false);
 
 }  // namespace argiv

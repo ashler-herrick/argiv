@@ -10,7 +10,8 @@
 namespace argiv {
 
 std::shared_ptr<arrow::Table> compute_greeks_table(
-    const std::shared_ptr<arrow::Table>& input, IVSolver solver) {
+    const std::shared_ptr<arrow::Table>& input, IVSolver solver,
+    bool higher_order) {
 
     auto table = combine_and_validate(input);
     const int64_t n = table->num_rows();
@@ -36,6 +37,9 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
         iv_bid.resize(n);
         iv_ask.resize(n);
     }
+    const int64_t hn = higher_order ? n : 0;
+    std::vector<double> vanna(hn), volga(hn), charm(hn), speed(hn), zomma(hn),
+        color(hn);
 
     // Parallel computation
     #pragma omp parallel for schedule(dynamic, 256)
@@ -49,6 +53,20 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
         vega[i] = res.vega;
         theta[i] = res.theta;
         rho[i] = res.rho;
+
+        if (higher_order) {
+            double T = expiry[i];
+            double forward = spot[i] * std::exp((rate[i] - dividend_yield[i]) * T);
+            auto h = higher_order_greeks(spot[i], strike[i], forward, T,
+                                         rate[i], dividend_yield[i], res.iv,
+                                         res.delta, res.gamma, res.vega);
+            vanna[i] = h.vanna;
+            volga[i] = h.volga;
+            charm[i] = h.charm;
+            speed[i] = h.speed;
+            zomma[i] = h.zomma;
+            color[i] = h.color;
+        }
 
         if (has_bid_ask) {
             iv_bid[i] = compute_single(option_type[i], spot[i], strike[i],
@@ -97,6 +115,20 @@ std::shared_ptr<arrow::Table> compute_greeks_table(
     result = *result->AddColumn(result->num_columns(),
                                 arrow::field("rho", arrow::float64()),
                                 build_col("rho", rho));
+
+    if (higher_order) {
+        auto add_col = [&](const char* name, const std::vector<double>& data) {
+            result = *result->AddColumn(result->num_columns(),
+                                        arrow::field(name, arrow::float64()),
+                                        build_col(name, data));
+        };
+        add_col("vanna", vanna);
+        add_col("volga", volga);
+        add_col("charm", charm);
+        add_col("speed", speed);
+        add_col("zomma", zomma);
+        add_col("color", color);
+    }
 
     if (has_bid_ask) {
         result = *result->AddColumn(result->num_columns(),

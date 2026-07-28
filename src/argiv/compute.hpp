@@ -8,9 +8,11 @@ namespace argiv {
 
 // Takes a table with columns: option_type (int: 1=call, -1=put),
 // spot, strike, expiry (years), rate, dividend_yield, market_price (all double).
-// Returns a new table with the input columns plus: iv, delta, gamma, vega, theta, rho.
+// Returns a new table with the input columns plus: iv, delta, gamma, vega, theta, rho,
+// plus vanna, volga, charm, speed, zomma, color when higher_order is true.
 std::shared_ptr<arrow::Table> compute_greeks_table(
     const std::shared_ptr<arrow::Table>& input,
-    IVSolver solver = IVSolver::Numerical);
+    IVSolver solver = IVSolver::Numerical,
+    bool higher_order = false);
 
 }  // namespace argiv

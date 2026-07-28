@@ -1,7 +1,7 @@
 import pyarrow as pa
 
 def compute_greeks(
-    table: pa.Table, iv_solver: str = "numerical"
+    table: pa.Table, iv_solver: str = "numerical", higher_order: bool = False
 ) -> pa.Table:
     """
     Compute Greeks (and optionally IV) for a pyarrow Table of options.
@@ -21,12 +21,16 @@ def compute_greeks(
             - iv (float64): Pre-computed implied volatility (skip solve)
         iv_solver (str): "numerical", "schadner", or "lookup". Ignored when
             ``iv`` is supplied.
+        higher_order (bool): Also emit vanna, volga, charm, speed, zomma and
+            color. charm/color are d/dt (calendar time), like theta.
 
     Returns:
         pa.Table: Input columns plus:
             - delta, gamma, vega, theta, rho (float64)
             - iv (float64): only on the price path
             - iv_bid, iv_ask (float64): only when bid_price/ask_price provided
+            - vanna, volga, charm, speed, zomma, color (float64): only when
+              higher_order=True
     """
     ...
 

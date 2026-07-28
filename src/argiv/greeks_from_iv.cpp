@@ -1,4 +1,5 @@
 #include "argiv/arrow_helpers.hpp"
+#include "argiv/core.hpp"
 #include "argiv/greeks_from_iv.hpp"
 
 #include <cmath>
@@ -16,7 +17,7 @@ constexpr double NaN = std::numeric_limits<double>::quiet_NaN();
 }  // namespace
 
 std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
-    const std::shared_ptr<arrow::Table>& input) {
+    const std::shared_ptr<arrow::Table>& input, bool higher_order) {
 
     auto table = combine_and_validate(input);
     const int64_t n = table->num_rows();
@@ -32,6 +33,9 @@ std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
 
     // Pre-allocate output vectors
     std::vector<double> delta(n), gamma(n), vega(n), theta(n), rho(n);
+    const int64_t hn = higher_order ? n : 0;
+    std::vector<double> vanna(hn), volga(hn), charm(hn), speed(hn), zomma(hn),
+        color(hn);
 
     #pragma omp parallel for schedule(dynamic, 256)
     for (int64_t i = 0; i < n; ++i) {
@@ -46,6 +50,14 @@ std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
             vega[i] = NaN;
             theta[i] = NaN;
             rho[i] = NaN;
+            if (higher_order) {
+                vanna[i] = NaN;
+                volga[i] = NaN;
+                charm[i] = NaN;
+                speed[i] = NaN;
+                zomma[i] = NaN;
+                color[i] = NaN;
+            }
             continue;
         }
 
@@ -65,6 +77,17 @@ std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
         vega[i] = calc.vega(T);
         theta[i] = calc.theta(S, T);
         rho[i] = calc.rho(T);
+
+        if (higher_order) {
+            auto h = higher_order_greeks(S, K, forward, T, r, q, sigma,
+                                         delta[i], gamma[i], vega[i]);
+            vanna[i] = h.vanna;
+            volga[i] = h.volga;
+            charm[i] = h.charm;
+            speed[i] = h.speed;
+            zomma[i] = h.zomma;
+            color[i] = h.color;
+        }
     }
 
     // Build output columns
@@ -98,6 +121,20 @@ std::shared_ptr<arrow::Table> compute_greeks_from_iv_table(
     result = *result->AddColumn(result->num_columns(),
                                 arrow::field("rho", arrow::float64()),
                                 build_col("rho", rho));
+
+    if (higher_order) {
+        auto add_col = [&](const char* name, const std::vector<double>& data) {
+            result = *result->AddColumn(result->num_columns(),
+                                        arrow::field(name, arrow::float64()),
+                                        build_col(name, data));
+        };
+        add_col("vanna", vanna);
+        add_col("volga", volga);
+        add_col("charm", charm);
+        add_col("speed", speed);
+        add_col("zomma", zomma);
+        add_col("color", color);
+    }
 
     return result;
 }

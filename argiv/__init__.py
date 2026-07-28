@@ -66,7 +66,7 @@ _GREEKS_OPTIONAL_DOUBLE = ["bid_price", "ask_price"]
 
 
 def compute_greeks(
-    table: pa.Table, iv_solver: str = "numerical"
+    table: pa.Table, iv_solver: str = "numerical", higher_order: bool = False
 ) -> pa.Table:
     """Compute Greeks (and optionally IV) for a table of options.
 
@@ -92,12 +92,17 @@ def compute_greeks(
         price). Lookup hits ~4-decimal accuracy on σ for inputs in the
         tabulated domain (|k| ≤ 1.5, σ-range covering typical markets) and
         returns NaN outside; the table is built once at module load.
+    higher_order : bool, default False
+        Also emit vanna (d²V/dS dσ), volga (d²V/dσ²), charm (dΔ/dt),
+        speed (dΓ/dS), zomma (dΓ/dσ) and color (dΓ/dt). charm and color
+        differentiate w.r.t. calendar time, matching theta's sign convention.
 
     Returns
     -------
     pyarrow.Table
         Input columns plus delta, gamma, vega, theta, rho. On the price path,
-        also iv (and iv_bid, iv_ask if bid/ask provided).
+        also iv (and iv_bid, iv_ask if bid/ask provided). With
+        ``higher_order``, also vanna, volga, charm, speed, zomma, color.
     """
     _check_required(table, _GREEKS_CORE)
     has_iv = "iv" in table.schema.names
@@ -119,7 +124,7 @@ def compute_greeks(
     table = _ensure_column_types(table, type_map)
     _check_nulls(table, list(type_map.keys()))
 
-    return _compute_greeks_impl(table, iv_solver)
+    return _compute_greeks_impl(table, iv_solver, higher_order)
 
 
 # -- fit_vol_surface -----------------------------------------------------------

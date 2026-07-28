@@ -27,7 +27,8 @@ PYBIND11_MODULE(_core, m) {
 
     m.def(
         "compute_greeks",
-        [](py::object input_table, std::string iv_solver) -> py::object {
+        [](py::object input_table, std::string iv_solver,
+           bool higher_order) -> py::object {
             auto solver = parse_solver(iv_solver);
             auto table = argiv::import_table(input_table);
             const bool has_iv = table->GetColumnByName("iv") != nullptr;
@@ -42,14 +43,17 @@ PYBIND11_MODULE(_core, m) {
             {
                 py::gil_scoped_release release;
                 if (has_iv) {
-                    result = argiv::compute_greeks_from_iv_table(table);
+                    result = argiv::compute_greeks_from_iv_table(table,
+                                                                 higher_order);
                 } else {
-                    result = argiv::compute_greeks_table(table, solver);
+                    result = argiv::compute_greeks_table(table, solver,
+                                                         higher_order);
                 }
             }
             return argiv::export_table(result);
         },
         py::arg("table"), py::arg("iv_solver") = std::string("numerical"),
+        py::arg("higher_order") = false,
         R"(Compute implied volatility and Greeks for a table of options.
 
         If the input table has an 'iv' column, Greeks are computed directly
@@ -65,12 +69,16 @@ PYBIND11_MODULE(_core, m) {
             solve). If both are present, 'iv' wins.
             Optional (price path only): bid_price, ask_price (float64) for
             bid/ask IV bounds.
+        higher_order : bool, default False
+            Also emit vanna, volga, charm, speed, zomma, color.
 
         Returns
         -------
         pyarrow.Table
             Input columns plus delta, gamma, vega, theta, rho. On the price
             path, also iv (and iv_bid, iv_ask if bid/ask provided).
+            With higher_order=True, also vanna, volga, charm, speed, zomma,
+            color.
         )");
 
     m.def(
